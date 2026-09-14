@@ -6,10 +6,20 @@ from aiogram.types import (
 # --- Главное меню (зелёная тема) ---
 main_menu = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="🟢 Чат агентов")],
-        [KeyboardButton(text="✅ Запись на собеседование"), KeyboardButton(text="📗 Обучение")],
-        [KeyboardButton(text="💳 Кошелек"), KeyboardButton(text="✳️ Условия работы")],
-        [KeyboardButton(text="💵 Мои модели"), KeyboardButton(text="📊 Аналитика")],
+        [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="✅ Запись на собеседование")],
+        [KeyboardButton(text="💳 Кошелек"), KeyboardButton(text="💵 Мои модели")],
+        [KeyboardButton(text="🤝 Партнерская сеть"), KeyboardButton(text="🛒 Магазин")],
+    ],
+    resize_keyboard=True,
+)
+
+# --- Подменю «Партнерская сеть» (заменяет главное меню) ---
+network_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🟢 Чат агентов"), KeyboardButton(text="📗 Обучение")],
+        [KeyboardButton(text="✳️ Условия сети"), KeyboardButton(text="💼 Офферы партнёрки")],
+        [KeyboardButton(text="📊 Аналитика")],
+        [KeyboardButton(text="🔴 Отмена")],
     ],
     resize_keyboard=True,
 )
@@ -21,7 +31,7 @@ leader_menu = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="👤 Профиль"), KeyboardButton(text="✅ Запись на собеседование")],
         [KeyboardButton(text="💳 Кошелек")],
-        [KeyboardButton(text="💵 Модели")],
+        [KeyboardButton(text="💵 Модели"), KeyboardButton(text="🛒 Магазин")],
         [KeyboardButton(text="🔍 Поиск агента")],
     ],
     resize_keyboard=True,
@@ -52,6 +62,8 @@ admin_panel_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🧭 Путь агента (соло/команда)", callback_data="adm:agent_path")],
     [InlineKeyboardButton(text="👥 Команды", callback_data="adm:teams")],
     [InlineKeyboardButton(text="🏆 Топы (воронка)", callback_data="adm:tops")],
+    [InlineKeyboardButton(text="🛒 Магазин (пост)", callback_data="adm:shop_view")],
+    [InlineKeyboardButton(text="📣 Рассылка всем", callback_data="adm:broadcast")],
     [InlineKeyboardButton(text="➕ Добавить партнёра", callback_data="adm:add_partner")],
     [InlineKeyboardButton(text="🤝 Партнёры (удаление)", callback_data="adm:partners")],
     [InlineKeyboardButton(text="🔗 Партнёры агентам", callback_data="adm:agent_partners")],
@@ -92,11 +104,8 @@ def model_card_kb(model_id: int, status: str) -> InlineKeyboardMarkup:
         if status == "active"
         else InlineKeyboardButton(text="Активна ✅", callback_data=f"mstat:{model_id}:active")
     )
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Смена", callback_data=f"shift:{model_id}:1"),
-         InlineKeyboardButton(text="➖ Смена", callback_data=f"shift:{model_id}:-1")],
-        [toggle],
-    ])
+    # смены считаются автоматически из отчётника модели - кнопок ручной правки нет
+    return InlineKeyboardMarkup(inline_keyboard=[[toggle]])
 
 
 def materials_kb(materials) -> InlineKeyboardMarkup:
@@ -120,15 +129,6 @@ mentor_panel_kb = InlineKeyboardMarkup(inline_keyboard=[
 
 
 # --- Подменю «Условия работы» (заменяет главное меню) ---
-work_terms_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="💼 Офферы партнёрки")],
-        [KeyboardButton(text="✳️ Условия сети")],
-        [KeyboardButton(text="🔴 Отмена")],
-    ],
-    resize_keyboard=True,
-)
-
 # --- Универсальная инлайн-кнопка отмены для шагов ввода ---
 cancel_kb = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="🔴 Отмена", callback_data="icancel"),

@@ -1,3 +1,4 @@
+import asyncio
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -9,6 +10,7 @@ from aiogram.types import (
 
 import db
 import keyboards as kb
+from services.posts import serialize_post, send_post
 
 router = Router()
 
@@ -51,10 +53,15 @@ async def approve(call: CallbackQuery, bot: Bot):
         return await call.answer("Нет прав", show_alert=True)
     tg_id = int(call.data.split(":")[1])
     await db.set_role(tg_id, "agent")
-    await call.message.edit_text(call.message.text + "\n\n✅ Принят")
+    await db.set_onboarded(tg_id, 0)
+    await call.message.edit_text(call.message.html_text + "\n\n✅ Принят", parse_mode="HTML")
     try:
+        from aiogram.types import ReplyKeyboardRemove
         await bot.send_message(
-            tg_id, "🎉 Ваша заявка одобрена! Добро пожаловать", reply_markup=kb.main_menu
+            tg_id,
+            "🎉 Ваша заявка одобрена! Добро пожаловать\n\n"
+            "Сейчас пройдём короткое знакомство - меню откроется после него",
+            reply_markup=ReplyKeyboardRemove(),
         )
         from handlers.user import send_onb_step
         await send_onb_step(bot, tg_id, 1)
@@ -69,7 +76,7 @@ async def reject(call: CallbackQuery, bot: Bot):
         return await call.answer("Нет прав", show_alert=True)
     tg_id = int(call.data.split(":")[1])
     await db.set_role(tg_id, "banned")
-    await call.message.edit_text(call.message.text + "\n\n🚫 Отклонён")
+    await call.message.edit_text(call.message.html_text + "\n\n🔴 Отклонён", parse_mode="HTML")
     try:
         await bot.send_message(tg_id, "К сожалению, ваша заявка отклонена")
     except Exception:
@@ -96,7 +103,13 @@ async def panel_pending(call: CallbackQuery):
     for u in pending:
         agent_code = db.get_agent_code(u)
         await call.message.answer(
-            f"📥 Заявка: {u['full_name']}\nАгент ID: {agent_code}",
+            f"🟢 <b>ЗАЯВКА НА ВСТУПЛЕНИЕ</b>\n"
+            f"━━━━━━━━━━━━━━━\n"
+            f"👤 Имя: <b>{u['full_name'] or '-'}</b>\n"
+            f"✅ Агент ID: <code>{agent_code}</code>\n"
+            f"🟢 Юзернейм: @{u['username'] or '-'}\n"
+            f"🟩 Telegram ID: <code>{u['tg_id']}</code>",
+            parse_mode="HTML",
             reply_markup=kb.approve_kb(u["tg_id"]),
         )
     await call.answer()
@@ -227,10 +240,9 @@ async def panel_lesson_edit_save(message: Message, state: FSMContext):
 async def panel_terms_view(call: CallbackQuery):
     if not await is_staff(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    text = await db.get_setting("network_terms") or "Пост ещё не задан"
-    await call.message.answer(
-        f"✳️ <b>Условия сети - текущий пост</b>\n━━━━━━━━━━━━━━━\n{text}",
-        parse_mode="HTML", disable_web_page_preview=True,
+    await send_post(
+        call.bot, call.message.chat.id, await db.get_setting("network_terms"),
+        header="✳️ <b>УСЛОВИЯ СЕТИ · ТЕКУЩИЙ ПОСТ</b>\n━━━━━━━━━━━━━━━\n",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✏️ Изменить", callback_data="panel:set_terms")
         ]]),
@@ -242,10 +254,9 @@ async def panel_terms_view(call: CallbackQuery):
 async def panel_offers_view(call: CallbackQuery):
     if not await is_staff(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    text = await db.get_setting("partner_offers") or "Пост ещё не задан"
-    await call.message.answer(
-        f"💼 <b>Офферы партнёрки - текущий пост</b>\n━━━━━━━━━━━━━━━\n{text}",
-        parse_mode="HTML", disable_web_page_preview=True,
+    await send_post(
+        call.bot, call.message.chat.id, await db.get_setting("partner_offers"),
+        header="💼 <b>ОФФЕРЫ ПАРТНЁРКИ · ТЕКУЩИЙ ПОСТ</b>\n━━━━━━━━━━━━━━━\n",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="✏️ Изменить", callback_data="panel:set_offers")
         ]]),
@@ -366,16 +377,16 @@ async def set_terms_start(call: CallbackQuery, state: FSMContext):
         return await call.answer("Нет прав", show_alert=True)
     current = await db.get_setting("network_terms")
     if current:
-        await call.message.answer(f"Текущий текст:\n\n{current}")
+        await send_post(call.bot, call.message.chat.id, current, header="Сейчас:\n")
     await state.set_state(MForms.terms)
-    await call.message.answer("Отправьте новый текст «Условий сети» одним сообщением:", reply_markup=kb.cancel_kb)
+    await call.message.answer("Отправьте новый пост «Условия сети» одним сообщением: текст, файл, фото или гифку (с подписью):", reply_markup=kb.cancel_kb)
     await call.answer()
 
 
 @router.message(MForms.terms)
 async def set_terms_save(message: Message, state: FSMContext):
     await state.clear()
-    await db.set_setting("network_terms", message.text)
+    await db.set_setting("network_terms", serialize_post(message))
     await message.answer("✅ Условия сети сохранены. Агенты увидят их по кнопке «✳️ Условия сети»")
 
 
@@ -387,16 +398,16 @@ async def set_offers_start(call: CallbackQuery, state: FSMContext):
         return await call.answer("Нет прав", show_alert=True)
     current = await db.get_setting("partner_offers")
     if current:
-        await call.message.answer(f"Текущий текст:\n\n{current}")
+        await send_post(call.bot, call.message.chat.id, current, header="Сейчас:\n")
     await state.set_state(MForms.offers)
-    await call.message.answer("Отправьте новый текст «Офферов партнёрки» одним сообщением:", reply_markup=kb.cancel_kb)
+    await call.message.answer("Отправьте новый пост «Офферы партнёрки» одним сообщением: текст, файл, фото или гифку (с подписью):", reply_markup=kb.cancel_kb)
     await call.answer()
 
 
 @router.message(MForms.offers)
 async def set_offers_save(message: Message, state: FSMContext):
     await state.clear()
-    await db.set_setting("partner_offers", message.text)
+    await db.set_setting("partner_offers", serialize_post(message))
     await message.answer("✅ Офферы партнёрки сохранены. Агенты увидят их в «✳️ Условия работы»")
 
 
@@ -432,6 +443,8 @@ async def add_balance_save(message: Message, state: FSMContext, bot: Bot):
 # ---------- Раздел «Управление» (только админ) ----------
 
 class AForms(StatesGroup):
+    shop_post = State()
+    broadcast = State()
     partner_name = State()
     partner_chat_id = State()
     partner_sheet_url = State()
@@ -1397,6 +1410,111 @@ async def adm_tops_render(call: CallbackQuery):
         body = "\n\n".join(lines)
     await call.message.answer(
         f"{title}\n{TOP_SEP}\n📆 Период: <b>{label}</b>\n{TOP_SEP}\n\n{body}",
+        parse_mode="HTML",
+    )
+    await call.answer()
+
+
+# ---------- Магазин: пост (только админ) ----------
+
+@router.callback_query(F.data == "adm:shop_view")
+async def adm_shop_view(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await send_post(
+        call.bot, call.message.chat.id, await db.get_setting("shop_post"),
+        header="🛒 <b>МАГАЗИН · ТЕКУЩИЙ ПОСТ</b>\n━━━━━━━━━━━━━━━\n",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✏️ Изменить", callback_data="adm:shop_set")
+        ]]),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:shop_set")
+async def adm_shop_set(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AForms.shop_post)
+    await call.message.answer(
+        "Отправьте новый пост «Магазин» одним сообщением: текст, файл, фото или гифку (с подписью):",
+        reply_markup=kb.cancel_kb,
+    )
+    await call.answer()
+
+
+@router.message(AForms.shop_post)
+async def adm_shop_save(message: Message, state: FSMContext):
+    await state.clear()
+    await db.set_setting("shop_post", serialize_post(message))
+    await message.answer("✅ Пост «Магазин» сохранён. Агенты увидят его по кнопке «🛒 Магазин»")
+
+
+# ---------- Рассылка всем пользователям (только админ, с подтверждением) ----------
+
+@router.callback_query(F.data == "adm:broadcast")
+async def adm_broadcast_start(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AForms.broadcast)
+    total = len(await db.get_all_active_tg_ids())
+    await call.message.answer(
+        f"📣 <b>РАССЫЛКА</b>\n━━━━━━━━━━━━━━━\n"
+        f"Получателей: <b>{total}</b>\n\n"
+        f"Отправьте сообщение для рассылки: текст, фото, файл или гифку с подписью. "
+        f"Оно уйдёт всем ровно в таком виде",
+        parse_mode="HTML",
+        reply_markup=kb.cancel_kb,
+    )
+    await call.answer()
+
+
+@router.message(AForms.broadcast)
+async def adm_broadcast_preview(message: Message, state: FSMContext):
+    await state.update_data(bc_chat_id=message.chat.id, bc_message_id=message.message_id)
+    await state.set_state(None)
+    await message.answer("👀 Так увидят рассылку получатели:")
+    await message.bot.copy_message(message.chat.id, message.chat.id, message.message_id)
+    total = len(await db.get_all_active_tg_ids())
+    await message.answer(
+        f"⚠️ <b>Отправить рассылку {total} пользователям?</b>\nОтменить после отправки нельзя",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, отправить", callback_data="bc_send")],
+            [InlineKeyboardButton(text="🔴 Отмена", callback_data="bc_cancel")],
+        ]),
+    )
+
+
+@router.callback_query(F.data == "bc_cancel")
+async def adm_broadcast_cancel(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("🔴 Рассылка отменена")
+    await call.answer()
+
+
+@router.callback_query(F.data == "bc_send")
+async def adm_broadcast_send(call: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    data = await state.get_data()
+    await state.clear()
+    if not data.get("bc_message_id"):
+        return await call.answer("Сообщение для рассылки не найдено, начните заново", show_alert=True)
+    await call.message.edit_text("📣 Рассылка запущена, это займёт немного времени…")
+    sent, failed = 0, 0
+    for tg_id in await db.get_all_active_tg_ids():
+        if tg_id == call.from_user.id:
+            continue
+        try:
+            await bot.copy_message(tg_id, data["bc_chat_id"], data["bc_message_id"])
+            sent += 1
+        except Exception:
+            failed += 1  # заблокировал бота / удалил аккаунт
+        await asyncio.sleep(0.05)  # защита от лимитов Telegram
+    await call.message.answer(
+        f"✅ <b>РАССЫЛКА ЗАВЕРШЕНА</b>\n━━━━━━━━━━━━━━━\n"
+        f"Доставлено: <b>{sent}</b>\nНе доставлено: <b>{failed}</b>",
         parse_mode="HTML",
     )
     await call.answer()

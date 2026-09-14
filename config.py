@@ -1,10 +1,10 @@
 import os
 
 # Токен бота из @BotFather
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8302783559:AAHxiiVa2uAGzcDfkkMkMDIaoL3CBC4tKmw")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8809902412:AAHtg9naSNY2vJNZ8M_Jy4OXBNwtE6V4j48")
 
 # Telegram ID главного администратора (узнать свой ID: @userinfobot)
-ADMIN_ID = int(os.getenv("ADMIN_ID", "8593342266"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "548363156"))
 
 # Путь к базе данных
 DB_PATH = os.getenv("DB_PATH", "crm.db")

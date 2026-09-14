@@ -5,15 +5,18 @@ from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 import db
+from services.shift_tracker import extract_model_name_from_text
 
 logger = logging.getLogger(__name__)
+
+SEP = "━━━━━━━━━━━━━━━"
 
 last_morning_digest_date = ""
 
 
 def build_confirm_buttons(interview_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"agent_confirm:{interview_id}"),
+        InlineKeyboardButton(text="✅ Модель придёт", callback_data=f"agent_confirm:{interview_id}"),
         InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"agent_reject:{interview_id}"),
     ]])
 
@@ -24,7 +27,8 @@ async def check_6h_confirm_reminders(bot: Bot):
     Если до собеседования осталось <= 6 часов, отправляет агенту сообщение с кнопками подтверждения.
     """
     try:
-        accepted_interviews = await db.get_unnotified_accepted_interviews()
+        # заявки, где партнёр принял, а агент ещё не ответил (статус всё ещё «Принято»)
+        accepted_interviews = await db.get_unanswered_accepted_interviews()
         if not accepted_interviews:
             return
 
@@ -45,10 +49,15 @@ async def check_6h_confirm_reminders(bot: Bot):
                 continue
 
             # До собеса осталось <= 6 часов (или дата не распарсилась/прошла) -> отправляем кнопки!
+            model_nm = extract_model_name_from_text(text)
             msg_text = (
-                f"🔔 <b>Подтверждение собеседования №{interview_id}!</b>\n\n"
-                f"📅 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n\n"
-                f"⏳ До собеседования осталось менее 6 часов. Пожалуйста, свяжитесь с моделью и подтвердите заявку:"
+                f"🟢 <b>СОБЕСЕДОВАНИЕ №{interview_id} ЧЕРЕЗ 6 ЧАСОВ</b>\n"
+                f"{SEP}\n"
+                + (f"💚 Модель: <b>{model_nm}</b>\n" if model_nm else "")
+                + f"📗 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n"
+                f"{SEP}\n"
+                f"Свяжитесь с моделью и подтвердите, что она <b>придёт на собеседование</b> "
+                f"в назначенное время. Если модель не выходит на связь или отказалась - нажмите «Не придёт»"
             )
 
             try:
@@ -58,8 +67,8 @@ async def check_6h_confirm_reminders(bot: Bot):
                     parse_mode="HTML",
                     reply_markup=build_confirm_buttons(interview_id)
                 )
-                await db.mark_confirm_sent(interview_id)
-                logger.info(f"Агенту {agent_tg_id} отправлены кнопки подтверждения за 6 часов до собеседования №{interview_id}")
+                await db.mark_reminder_6h_sent(interview_id)
+                logger.info(f"Агенту {agent_tg_id} отправлено 6-часовое напоминание по собеседованию №{interview_id}")
             except Exception as e:
                 logger.error(f"Ошибка отправки кнопок подтверждения агенту {agent_tg_id}: {e}")
 
@@ -85,13 +94,13 @@ async def check_morning_digest(bot: Bot):
                 if not interviews:
                     continue
 
-                lines = [f"🌅 <b>Доброе утро! Ваши собеседования на сегодня ({today_str}):</b>\n"]
+                lines = [f"🟢 <b>СОБЕСЕДОВАНИЯ НА СЕГОДНЯ · {today_str}</b>\n{SEP}"]
                 for idx, inv in enumerate(interviews, 1):
                     s_time = inv.get("sobes_time") or "-"
                     status = inv.get("app_status") or "Новая"
                     lines.append(
-                        f"<b>{idx}. {s_time} МСК</b> (Заявка №{inv['id']})\n"
-                        f"   📌 Статус: <i>{status}</i>"
+                        f"<b>{idx}. {s_time} МСК</b> · заявка №{inv['id']}\n"
+                        f"✅ Статус: {status}"
                     )
 
                 full_msg = "\n".join(lines)

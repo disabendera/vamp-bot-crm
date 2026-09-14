@@ -12,6 +12,8 @@ import db
 
 logger = logging.getLogger(__name__)
 
+SEP = "━━━━━━━━━━━━━━━"
+
 SERVICE_ACCOUNT_FILE = "service_account.json"
 _gspread_client = None
 
@@ -201,22 +203,32 @@ async def check_single_report_sheet(bot: Bot, session: aiohttp.ClientSession, in
             agent_tg_id = payout["agent_tg_id"]
             new_balance = payout["new_balance"]
 
+            model_row = await db.get_model_by_interview(interview["id"])
+            model_id_line = f"🟩 ID модели: <b>{model_row['id']}</b>\n" if model_row else ""
             if amount > 0:
                 msg_text = (
-                    f"💰 <b>Начисление за смену модели!</b>\n\n"
-                    f"👤 Модель: <b>{model_name}</b>\n"
-                    f"📅 Дата смены: <b>{shift_date}</b>\n"
-                    f"⏱ Время работы: <b>{hours_display} ч.</b>\n"
-                    f"💵 Начислено: <b>+${amount:.2f}</b> к балансу!\n"
+                    f"💵 <b>НАЧИСЛЕНИЕ ЗА СМЕНУ</b>\n"
+                    f"{SEP}\n"
+                    f"💚 Модель: <b>{model_name}</b>\n"
+                    f"{model_id_line}"
+                    f"📗 Заявка: <b>№{interview['id']}</b>\n"
+                    f"✅ Дата смены: <b>{shift_date}</b>\n"
+                    f"🟢 Время работы: <b>{hours_display} ч</b>\n"
+                    f"{SEP}\n"
+                    f"💵 Начислено: <b>+${amount:.2f}</b>\n"
                     f"💳 Ваш баланс: <b>${new_balance:.2f}</b>"
                 )
             else:
                 msg_text = (
-                    f"⚠️ <b>Смена модели зафиксирована без выплаты</b>\n\n"
-                    f"👤 Модель: <b>{model_name}</b>\n"
-                    f"📅 Дата смены: <b>{shift_date}</b>\n"
-                    f"⏱ Время работы: <b>{hours_display} ч.</b>\n\n"
-                    f"ℹ️ Модель отработала меньше 2 часов, поэтому реферальная выплата за смену не начисляется."
+                    f"✳️ <b>СМЕНА БЕЗ ВЫПЛАТЫ</b>\n"
+                    f"{SEP}\n"
+                    f"💚 Модель: <b>{model_name}</b>\n"
+                    f"{model_id_line}"
+                    f"📗 Заявка: <b>№{interview['id']}</b>\n"
+                    f"✅ Дата смены: <b>{shift_date}</b>\n"
+                    f"🟢 Время работы: <b>{hours_display} ч</b>\n"
+                    f"{SEP}\n"
+                    f"Модель отработала меньше 2 часов, поэтому реферальная выплата за смену не начисляется"
                 )
 
             try:
@@ -240,10 +252,10 @@ async def check_single_report_sheet(bot: Bot, session: aiohttp.ClientSession, in
 
                                 if shift_num == 1:
                                     target_topic = p_dict.get("topic_shift1")
-                                    shift_header = f"💰 <b>Первая смена — Заявка №{interview['id']} (Дата: {shift_date})</b>"
+                                    shift_header = f"✅ <b>ПЕРВАЯ СМЕНА · ЗАЯВКА №{interview['id']} · {shift_date}</b>"
                                 elif shift_num == 2:
                                     target_topic = p_dict.get("topic_shift2")
-                                    shift_header = f"💵 <b>Вторая смена — Заявка №{interview['id']} (Дата: {shift_date})</b>"
+                                    shift_header = f"💵 <b>ВТОРАЯ СМЕНА · ЗАЯВКА №{interview['id']} · {shift_date}</b>"
 
                                 if shift_header:
                                     p_shift_msg = await db.format_anketa_topic_message(interview, shift_header)

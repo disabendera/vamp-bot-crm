@@ -1,11 +1,11 @@
-var BOT_WEBHOOK_URL = "https://lagging-prevail-cure.ngrok-free.dev/webhook/sheet_status";
+var BOT_WEBHOOK_URL = "https://goldmine-pruning-handshake.ngrok-free.dev/webhook/sheet_status";
 var WEBHOOK_SECRET = "ca5xjwy5ex4QahythOagtse0lpoI94RtYEJA2CWBDRtO97rGF2txPlA403vE8qpS";
 
 // 1. ID таблицы-шаблона отчётника
 var TEMPLATE_SHEET_ID = "1FagJffQuPtDlvN0NkRlNwRgkNlFC9bOBHR1LoyOt1-c";
 
 // 2. Email сервисного аккаунта бота для автоматической выдачи прав на чтение
-var SERVICE_ACCOUNT_EMAIL = "crm-bot@crm-bot-507115.iam.gserviceaccount.com";
+var SERVICE_ACCOUNT_EMAIL = "crm-bot@crm-bot-505921.iam.gserviceaccount.com";
 
 var NOTIFY_COLUMNS = [
   "статус",

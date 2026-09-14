@@ -7,6 +7,8 @@ from config import WEBHOOK_PORT, WEBHOOK_SECRET
 
 logger = logging.getLogger(__name__)
 
+SEP = "━━━━━━━━━━━━━━━"
+
 
 async def handle_sheet_status(request: web.Request) -> web.Response:
     bot: Bot = request.app["bot"]
@@ -94,12 +96,12 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
     status_reason = str(data.get("status_reason") or "").strip()
 
     msg_text = (
-        f"🔔 <b>Обновление статуса заявки!</b>\n\n"
-        f"📋 <b>Заявка №{real_id}</b>\n"
-        f"📌 Новый статус: <b>{new_status}</b>"
+        f"🟢 <b>СТАТУС ЗАЯВКИ №{real_id}</b>\n"
+        f"{SEP}\n"
+        f"✅ Новый статус: <b>{new_status}</b>"
     )
     if status_reason:
-        msg_text += f"\n💬 <b>Причина статуса:</b> {status_reason}"
+        msg_text += f"\n✳️ Причина: {status_reason}"
 
     try:
         if is_accepted:
@@ -109,24 +111,26 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
             sobes_time = interview_dict.get("sobes_time") or ""
             text = interview_dict.get("text") or ""
             
-            sobes_dt = db.parse_interview_datetime(sobes_date, sobes_time, text)
-            
-            if sobes_dt and (sobes_dt - msk_now) > timedelta(hours=6):
-                # До собеса более 6 часов -> шлем инфо-сообщение без кнопок, кнопки придут за 6 часов
-                info_msg = (
-                    f"🤝 <b>Партнёр принял заявку №{real_id}!</b>\n\n"
-                    f"📅 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n"
-                    f"⏳ Кнопки подтверждения откроются в боте за 6 часов до собеседования."
-                )
-                await bot.send_message(agent_tg_id, info_msg, parse_mode="HTML")
-            else:
-                # До собеса менее 6 часов (или время прошло) -> слаем кнопки сразу
+            # Кнопки подтверждения приходят СРАЗУ после приёма партнёром.
+            # За 6 часов до собеса reminder_service напомнит, если агент ещё не ответил.
+            if True:
                 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
                 confirm_kb = InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"agent_confirm:{real_id}"),
-                    InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"agent_reject:{real_id}"),
+                    InlineKeyboardButton(text="✅ Модель придёт", callback_data=f"agent_confirm:{real_id}"),
+                    InlineKeyboardButton(text="🚫 Не придёт", callback_data=f"agent_reject:{real_id}"),
                 ]])
-                await bot.send_message(agent_tg_id, msg_text, parse_mode="HTML", reply_markup=confirm_kb)
+                from services.shift_tracker import extract_model_name_from_text
+                model_nm = extract_model_name_from_text(text)
+                confirm_text = (
+                    f"🟢 <b>ПАРТНЁР ПРИНЯЛ ЗАЯВКУ №{real_id}</b>\n"
+                    f"{SEP}\n"
+                    + (f"💚 Модель: <b>{model_nm}</b>\n" if model_nm else "")
+                    + f"📗 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n"
+                    f"{SEP}\n"
+                    f"Свяжитесь с моделью и подтвердите, что она <b>придёт на собеседование</b> "
+                    f"в назначенное время. Если модель не выходит на связь или отказалась - нажмите «Не придёт»"
+                )
+                await bot.send_message(agent_tg_id, confirm_text, parse_mode="HTML", reply_markup=confirm_kb)
                 await db.mark_confirm_sent(real_id)
         else:
             await bot.send_message(agent_tg_id, msg_text, parse_mode="HTML")
@@ -147,18 +151,18 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
 
                     if "собес" in status_lower and "не прошла" not in status_lower and "не прошёл" not in status_lower:
                         target_topic = p_dict.get("topic_sobes")
-                        topic_header = f"✅ <b>Заявка №{real_id} — Прошла собес</b>"
+                        topic_header = f"✅ <b>ЗАЯВКА №{real_id} · ПРОШЛА СОБЕС</b>"
                     elif "регистрац" in status_lower:
                         target_topic = p_dict.get("topic_registration")
-                        topic_header = f"🚀 <b>Заявка №{real_id} на регистрации</b>"
+                        topic_header = f"📗 <b>ЗАЯВКА №{real_id} · РЕГИСТРАЦИЯ</b>"
                     elif "подтвержд" in status_lower:
                         target_topic = p_dict.get("topic_confirmations")
-                        topic_header = f"📋 <b>Новая заявка на собеседование №{real_id}</b>"
+                        topic_header = f"🟢 <b>ЗАЯВКА №{real_id} · НА СОБЕСЕДОВАНИЕ</b>"
                     elif any(word in status_lower for word in ("слив", "отмен", "отклон", "не принят", "отказ")):
                         target_topic = p_dict.get("topic_cancelled")
-                        topic_header = f"❌ <b>Заявка №{real_id} — Слив / Отмена</b>"
+                        topic_header = f"🔴 <b>ЗАЯВКА №{real_id} · СЛИВ / ОТМЕНА</b>"
                         if status_reason:
-                            topic_header += f"\n💬 <b>Причина статуса:</b> {status_reason}"
+                            topic_header += f"\n✳️ Причина: {status_reason}"
 
                     if topic_header:
                         p_msg_text = await db.format_anketa_topic_message(interview_dict, topic_header)

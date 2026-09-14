@@ -98,6 +98,7 @@ async def init_db():
             ("phone", "ALTER TABLE models ADD COLUMN phone TEXT DEFAULT ''"),
             ("username", "ALTER TABLE models ADD COLUMN username TEXT DEFAULT ''"),
             ("shifts", "ALTER TABLE models ADD COLUMN shifts INTEGER NOT NULL DEFAULT 0"),
+            ("onboarded", "ALTER TABLE users ADD COLUMN onboarded INTEGER NOT NULL DEFAULT 1"),
             ("pending", "ALTER TABLE users ADD COLUMN pending REAL NOT NULL DEFAULT 0"),
             ("total_earned", "ALTER TABLE users ADD COLUMN total_earned REAL NOT NULL DEFAULT 0"),
             ("partner", "ALTER TABLE interviews ADD COLUMN partner TEXT DEFAULT ''"),
@@ -117,6 +118,7 @@ async def init_db():
             ("sobes_date", "ALTER TABLE interviews ADD COLUMN sobes_date TEXT DEFAULT ''"),
             ("sobes_time", "ALTER TABLE interviews ADD COLUMN sobes_time TEXT DEFAULT ''"),
             ("confirm_sent", "ALTER TABLE interviews ADD COLUMN confirm_sent INTEGER DEFAULT 0"),
+            ("reminder_6h_sent", "ALTER TABLE interviews ADD COLUMN reminder_6h_sent INTEGER DEFAULT 0"),
             ("agent_code", "ALTER TABLE users ADD COLUMN agent_code INTEGER"),
         ):
             try:
@@ -969,7 +971,9 @@ async def format_anketa_topic_message(interview: dict, header_title: str) -> str
     
     msg = (
         f"{header_title}\n"
-        f"👤 <b>Агент ID:</b> <code>{agent_code}</code>\n\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🟢 Агент ID: <code>{agent_code}</code>\n"
+        f"━━━━━━━━━━━━━━━\n"
         f"{raw_text}"
     )
     return msg
@@ -1096,3 +1100,48 @@ async def get_main_sheet_history(limit: int = 5000):
         )
         return await cur.fetchall()
 
+
+
+async def get_model_by_interview(interview_id: int):
+    """Модель, созданная из заявки (по interview_id)"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM models WHERE interview_id = ? ORDER BY id LIMIT 1", (interview_id,)
+        )
+        return await cur.fetchone()
+
+
+async def set_onboarded(tg_id: int, value: int):
+    """0 - агент ещё проходит вводные шаги (меню скрыто), 1 - прошёл"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET onboarded = ? WHERE tg_id = ?", (value, tg_id))
+        await db.commit()
+
+
+async def get_unanswered_accepted_interviews():
+    """Принятые партнёром заявки, по которым агент ещё не нажал «придёт/не придёт»
+    и 6-часовое напоминание ещё не отправлялось"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute(
+            "SELECT * FROM interviews "
+            "WHERE LOWER(app_status) LIKE '%принято%' "
+            "AND (reminder_6h_sent IS NULL OR reminder_6h_sent = 0)"
+        )
+        return await cur.fetchall()
+
+
+async def mark_reminder_6h_sent(interview_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE interviews SET reminder_6h_sent = 1 WHERE id = ?", (interview_id,))
+        await db.commit()
+
+
+async def get_all_active_tg_ids():
+    """Все пользователи с доступом (для рассылки)"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT tg_id FROM users WHERE role NOT IN ('pending', 'banned')"
+        )
+        return [r[0] for r in await cur.fetchall()]

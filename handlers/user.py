@@ -9,10 +9,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
                            InlineKeyboardButton, InputMediaPhoto,
-                           ReplyKeyboardMarkup, KeyboardButton)
+                           ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove)
 
 import db
 import keyboards as kb
+from services.banners import reply_banner
+from services.posts import send_post, parse_post, is_empty
 from config import ADMIN_ID
 from services.google_sheets import send_interview_to_sheet
 
@@ -59,6 +61,12 @@ async def require_access(message: Message) -> object | None:
     if user["role"] == "pending":
         await message.answer("⏳ Ваша заявка на рассмотрении у наставника. Ожидайте")
         return None
+    if "onboarded" in user.keys() and not user["onboarded"]:
+        await message.answer(
+            "📋 Сначала пройдите вводные шаги выше 👆 - меню откроется после завершения",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return None
     return user
 
 
@@ -80,12 +88,15 @@ async def cmd_start(message: Message, bot: Bot):
         u_obj = await db.get_user(tg_id)
         u_dict_obj = dict(u_obj) if u_obj else {}
         agent_code = u_dict_obj.get("agent_code") if u_dict_obj.get("agent_code") else (1000 + u_dict_obj.get("id", tg_id))
-        text = (f"📥 Новая заявка на вступление\n"
-                f"Агент ID: {agent_code}\n"
-                f"Имя: {message.from_user.full_name}")
+        text = (f"🟢 <b>НОВАЯ ЗАЯВКА НА ВСТУПЛЕНИЕ</b>\n"
+                f"━━━━━━━━━━━━━━━\n"
+                f"👤 Имя: <b>{message.from_user.full_name}</b>\n"
+                f"✅ Агент ID: <code>{agent_code}</code>\n"
+                f"🟢 Юзернейм: @{message.from_user.username or '-'}\n"
+                f"🟩 Telegram ID: <code>{tg_id}</code>")
         for sid in staff:
             try:
-                await bot.send_message(sid, text, reply_markup=kb.approve_kb(tg_id))
+                await bot.send_message(sid, text, parse_mode="HTML", reply_markup=kb.approve_kb(tg_id))
             except Exception:
                 pass
         await message.answer(
@@ -99,6 +110,10 @@ async def cmd_start(message: Message, bot: Bot):
     elif user["role"] == "banned":
         await message.answer("⛔ Доступ отклонён")
     else:
+        if "onboarded" in user.keys() and not user["onboarded"]:
+            await message.answer("📋 Продолжим вводные шаги:", reply_markup=ReplyKeyboardRemove())
+            await send_onb_step(bot, message.from_user.id, 1)
+            return
         await message.answer("Главное меню:", reply_markup=menu_for(user["role"]))
 
 
@@ -116,20 +131,18 @@ async def profile(message: Message):
     pending = u_dict.get("pending", 0.0)
     total_earned = u_dict.get("total_earned", 0.0)
     agent_code = u_dict.get("agent_code") if u_dict.get("agent_code") else (1000 + u_dict["id"])
-    await message.answer(
-        f"» <b>Твой профиль</b>\n\n"
+    await reply_banner(
+        message, "profile",
         f"👤 <b>Агент:</b> {agent_name}\n\n"
         f"✅ <b>Агентский айди:</b> <code>{agent_code}</code>\n\n"
         f"💳 <b>Кошелек:</b> <code>{wallet}</code>\n\n"
-        f"💵 <b>Текущий баланс:</b> ${u_dict.get('balance', 0):.2f} ({pending} за эту неделю)\n"
+        f"💵 <b>Текущий баланс:</b> ${u_dict.get('balance', 0):.2f} ({pending} за 2 недели)\n"
         f"🏆 <b>Заработано за всё время:</b> ${total_earned:.2f}\n\n"
         f"📗 Выплаты средств теперь доступны от суммы 50$, "
         f"всё, что меньше, остаётся в накоплениях\n\n"
         f"👉 <a href=\"https://www.bestchange.com/\">КАК ПОМЕНЯТЬ КРИПТУ НА ВАЛЮТУ?</a>\n\n"
         f"🟢 Выплаты производятся в долларах USDT BEP-20 "
         f"<a href=\"https://www.binance.com/ru/square/post/950859\">(как можно получить кошелек?)</a>",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
     )
 
 
@@ -142,19 +155,36 @@ async def agents_chat(message: Message):
         return
     link = await db.get_setting("agents_chat_link")
     if link:
-        await message.answer(f"🟢 Чат агентов: {link}")
+        text = f"Вступайте в чат агентов - общение, вопросы, поддержка команды\n\n👉 {link}"
     else:
-        await message.answer("Ссылка на чат агентов ещё не настроена. Обратитесь к наставнику")
+        text = "Ссылка на чат агентов ещё не настроена. Обратитесь к наставнику"
+    await reply_banner(message, "chat", text)
+
+
+# ---------- Магазин ----------
+
+@router.message(F.text == "🛒 Магазин")
+async def shop(message: Message):
+    user = await require_access(message)
+    if not user:
+        return
+    stored = await db.get_setting("shop_post")
+    post = parse_post(stored)
+    if post["type"] in ("text", "empty"):
+        await reply_banner(message, "shop", post.get("text") or "Магазин скоро откроется")
+    else:
+        await reply_banner(message, "shop", "🛒 Магазин")
+        await send_post(message.bot, message.chat.id, stored)
 
 
 # ---------- Условия работы ----------
 
-@router.message(F.text == "✳️ Условия работы")
-async def work_terms(message: Message):
+@router.message(F.text == "🤝 Партнерская сеть")
+async def partner_network(message: Message):
     user = await require_access(message)
     if not user:
         return
-    await message.answer("✳️ Условия работы - выберите раздел:", reply_markup=kb.work_terms_menu)
+    await message.answer("🤝 Партнерская сеть - выберите раздел:", reply_markup=kb.network_menu)
 
 
 @router.message(F.text == "💼 Офферы партнёрки")
@@ -162,12 +192,9 @@ async def show_offers(message: Message):
     user = await require_access(message)
     if not user:
         return
-    text = await db.get_setting("partner_offers")
-    if text:
-        await message.answer(f"💼 <b>Офферы партнёрки</b>\n\n{text}",
-                             parse_mode="HTML", disable_web_page_preview=True)
-    else:
-        await message.answer("💼 Офферы партнёрки скоро появятся здесь")
+    await send_post(message.bot, message.chat.id, await db.get_setting("partner_offers"),
+                    header="💼 <b>ОФФЕРЫ ПАРТНЁРКИ</b>\n━━━━━━━━━━━━━━━\n",
+                    empty_text="Офферы партнёрки скоро появятся здесь")
 
 
 @router.message(F.text == "✳️ Условия сети")
@@ -175,12 +202,9 @@ async def show_network_terms(message: Message):
     user = await require_access(message)
     if not user:
         return
-    text = await db.get_setting("network_terms")
-    if text:
-        await message.answer(f"✳️ <b>Условия сети</b>\n\n{text}",
-                             parse_mode="HTML", disable_web_page_preview=True)
-    else:
-        await message.answer("✳️ Условия сети скоро появятся здесь")
+    await send_post(message.bot, message.chat.id, await db.get_setting("network_terms"),
+                    header="✳️ <b>УСЛОВИЯ СЕТИ</b>\n━━━━━━━━━━━━━━━\n",
+                    empty_text="Условия сети скоро появятся здесь")
 
 
 # ---------- Запись на собеседование ----------
@@ -347,7 +371,10 @@ async def interview_position(message: Message, state: FSMContext):
             await state.clear()
             user = await db.get_user(message.from_user.id)
             return await message.answer(
-                "Вам ещё не назначен партнёр. Обратитесь к администратору",
+                "🔒 <b>Доступ к записи ещё не открыт</b>\n"
+                "━━━━━━━━━━━━━━━\n"
+                "Запросите доступ у наставника - после этого сможете записывать моделей на собеседование",
+                parse_mode="HTML",
                 reply_markup=menu_for(user["role"]),
             )
         await state.update_data(partner=partner["name"])
@@ -796,7 +823,8 @@ async def training(message: Message):
     if not user:
         return
     materials = await db.get_materials()
-    await message.answer("📗 Выберите урок:", reply_markup=kb.materials_kb(materials))
+    await reply_banner(message, "training", "Выберите урок 👇",
+                       reply_markup=kb.materials_kb(materials))
 
 
 @router.callback_query(F.data.startswith("mat:"))
@@ -810,9 +838,9 @@ async def show_material(call: CallbackQuery):
 # ---------- Реквизиты ----------
 
 WALLET_INFO = (
-    "<b>Кошелек для получения выплат</b>\n\n"
+    "<b>Кошелек для выплат</b>\n\n"
     "Текущий кошелек: <code>{current}</code>\n\n"
-    "Если у вас еще нет адреса кошелька, воспользуйтесь одной из инструкций:\n\n"
+    "Нет кошелька? Инструкции:\n\n"
     "👉 <a href=\"https://www.binance.com/ru/square/post/950859\">"
     "УЗНАТЬ КАК ПОЛУЧИТЬ АДРЕС КОШЕЛЬКА USDT BEP-20 на Trust Wallet?</a>\n\n"
     "👉 <a href=\"https://youtu.be/fKEAWs0w0r0\">"
@@ -842,10 +870,9 @@ async def wallet_start(message: Message, state: FSMContext):
         return
     current = user["wallet"] or "не указаны"
     await state.set_state(Forms.wallet)
-    await message.answer(
+    await reply_banner(
+        message, "wallet",
         WALLET_INFO.format(current=current),
-        parse_mode="HTML",
-        disable_web_page_preview=True,
         reply_markup=kb.cancel_kb,
     )
 
@@ -1000,6 +1027,10 @@ def render_model_card(m) -> str:
 
 @router.callback_query(F.data.startswith("shift:"))
 async def model_shift(call: CallbackQuery):
+    # ручная правка смен - только наставник/админ (старые кнопки у агентов не работают)
+    viewer = await db.get_user(call.from_user.id)
+    if not viewer or viewer["role"] not in ("mentor", "admin"):
+        return await call.answer("Смены начисляются автоматически из отчётника", show_alert=True)
     _, model_id, delta = call.data.split(":")
     await db.inc_shift(int(model_id), call.from_user.id, int(delta))
     m = await db.get_model_by_id(int(model_id), call.from_user.id)
@@ -1073,7 +1104,7 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
             # Отправка анкеты в Топик 2 (Подтверждения)
             if p_dict.get("chat_id"):
                 topic_conf = p_dict.get("topic_confirmations")
-                conf_header = f"✅ <b>Заявка №{interview_id} подтверждена агентом</b>"
+                conf_header = f"✅ <b>ЗАЯВКА №{interview_id} · ПОДТВЕРЖДЕНА АГЕНТОМ</b>"
                 conf_msg = await db.format_anketa_topic_message(interview, conf_header)
                 try:
                     kwargs = {"message_thread_id": topic_conf} if topic_conf else {}
@@ -1082,8 +1113,9 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
                     print(f"Ошибка отправки подтверждения в топик: {e}")
             
     await call.message.edit_text(
-        f"✅ <b>Заявка №{interview_id} подтверждена!</b>\n\n"
-        f"Модель <b>{name}</b> добавлена в раздел «💵 Мои модели».",
+        f"✅ <b>ЗАЯВКА №{interview_id} ПОДТВЕРЖДЕНА</b>\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"💚 Модель <b>{name}</b> добавлена в раздел «💵 Мои модели»",
         parse_mode="HTML"
     )
     await call.answer("✅ Подтверждено!")
@@ -1114,7 +1146,7 @@ async def agent_reject_interview(call: CallbackQuery, bot: Bot):
                     print(f"Ошибка отправки слива в топик: {e}")
 
     await call.message.edit_text(
-        f"🚫 <b>Заявка №{interview_id} отклонена агентом.</b>",
+        f"🔴 <b>ЗАЯВКА №{interview_id} · МОДЕЛЬ НЕ ПРИДЁТ</b>",
         parse_mode="HTML"
     )
     await call.answer("Отклонено")
@@ -1151,19 +1183,17 @@ def _onb_kb(text: str, step: str) -> InlineKeyboardMarkup:
 
 async def send_onb_step(bot: Bot, chat_id: int, step: int):
     if step == 1:
-        terms = await db.get_setting("network_terms") or "Текст условий появится позже"
-        await bot.send_message(
-            chat_id,
-            f"📋 <b>ШАГ 1/5 · УСЛОВИЯ РАБОТЫ СЕТИ</b>\n{ONB_SEP}\n{terms}",
-            parse_mode="HTML", disable_web_page_preview=True,
+        await send_post(
+            bot, chat_id, await db.get_setting("network_terms"),
+            header=f"📋 <b>ШАГ 1/5 · УСЛОВИЯ РАБОТЫ СЕТИ</b>\n{ONB_SEP}\n",
+            empty_text="Текст условий появится позже",
             reply_markup=_onb_kb("✅ Ознакомился", "2"),
         )
     elif step == 2:
-        offers = await db.get_setting("partner_offers") or "Офферы появятся позже"
-        await bot.send_message(
-            chat_id,
-            f"💼 <b>ШАГ 2/5 · ОФФЕРЫ СЕТИ</b>\n{ONB_SEP}\n{offers}",
-            parse_mode="HTML", disable_web_page_preview=True,
+        await send_post(
+            bot, chat_id, await db.get_setting("partner_offers"),
+            header=f"💼 <b>ШАГ 2/5 · ОФФЕРЫ СЕТИ</b>\n{ONB_SEP}\n",
+            empty_text="Офферы появятся позже",
             reply_markup=_onb_kb("✅ Ознакомился", "3"),
         )
     elif step == 3:
@@ -1210,10 +1240,11 @@ async def onb_next(call: CallbackQuery, state: FSMContext, bot: Bot):
         pass
     if step == "done":
         await state.clear()
+        await db.set_onboarded(call.from_user.id, 1)
         user = await db.get_user(call.from_user.id)
         await call.message.answer(
             f"🎉 <b>Готово! Вы прошли все шаги</b>\n{ONB_SEP}\n"
-            f"Добро пожаловать в команду - главное меню внизу 👇",
+            f"Добро пожаловать в PRIME PARTNERS - главное меню внизу 👇",
             parse_mode="HTML",
             reply_markup=menu_for(user["role"] if user else "agent"),
         )
