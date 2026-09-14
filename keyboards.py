@@ -54,8 +54,11 @@ admin_panel_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🏆 Топы (воронка)", callback_data="adm:tops")],
     [InlineKeyboardButton(text="➕ Добавить партнёра", callback_data="adm:add_partner")],
     [InlineKeyboardButton(text="🤝 Партнёры (удаление)", callback_data="adm:partners")],
+    [InlineKeyboardButton(text="🔗 Партнёры агентам", callback_data="adm:agent_partners")],
     [InlineKeyboardButton(text="🎓 Назначить наставника", callback_data="adm:add_mentor")],
     [InlineKeyboardButton(text="⬇️ Снять наставника", callback_data="adm:demote")],
+    [InlineKeyboardButton(text="📜 Логи основной таблицы", callback_data="adm:export_main_history")],
+    [InlineKeyboardButton(text="💸 Выплата сделана — обнулить балансы", callback_data="adm:mark_paid")],
 ])
 
 

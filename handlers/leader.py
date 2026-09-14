@@ -39,12 +39,12 @@ async def render_agent_card(agent, with_model_buttons: bool = True):
     role_name = {"agent": "🧑 Агент", "leader": "👑 Лидер", "mentor": "🎓 Наставник",
                  "admin": "⚙️ Администратор", "pending": "⏳ Заявка", "banned": "⛔ Отклонён"}
     path = f"👥 Команда «{team['name']}»" if team else "🧍 Соло"
+    agent_code = db.get_agent_code(agent)
     text = (
         f"🔍 <b>АНКЕТА АГЕНТА</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 <b>{agent['full_name'] or '-'}</b> (@{agent['username'] or '-'})\n"
-        f"🔢 Номер агента: <code>{agent['id']}</code>\n"
-        f"🆔 Telegram ID: <code>{agent['tg_id']}</code>\n"
+        f"👤 <b>{agent['full_name'] or '-'}</b>\n"
+        f"🔢 Агент ID: <code>{agent_code}</code>\n"
         f"🎭 Роль: {role_name.get(agent['role'], agent['role'])}\n"
         f"🧭 Путь: {path}\n"
         f"━━━━━━━━━━━━━━━\n"
@@ -79,7 +79,7 @@ async def search_start(message: Message, state: FSMContext):
     )
     await state.set_state(SearchForm.query)
     await message.answer(
-        "🔍 Отправьте номер агента, Telegram ID или @юзернейм:",
+        "🔍 Отправьте внутренний ID агента (например 1001), Telegram ID или @юзернейм:",
         reply_markup=kb.cancel_kb,
     )
 
@@ -509,9 +509,9 @@ async def _render_top(call: CallbackQuery, kind: str, dfrom: str, dto: str, labe
         title = "🏆 <b>ТОП СОЛО-АГЕНТОВ</b>"
         for r in rows:
             s1, s2 = shifts.get(r["tg_id"], (0, 0))
+            agent_code = db.get_agent_code(r)
             items.append({
-                "name": (f"{r['full_name'] or '-'} "
-                         f"(№{r['agent_no']}, @{r['username'] or '-'}, ID: <code>{r['tg_id']}</code>)"),
+                "name": f"{r['full_name'] or '-'} (ID: <code>{agent_code}</code>)",
                 "rec": r["records"], "reg": r["regs"] or 0,
                 "s1": s1 or 0, "s2": s2 or 0,
             })
@@ -758,7 +758,7 @@ async def model_search_run(message: Message, state: FSMContext):
             f"Статус: <b>{status_titles.get(m['status'], m['status'])}</b>\n"
             f"Смен: <b>{m['shifts']}</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Агент: {m['owner_name'] or '-'} (№{m['owner_no']}, @{m['owner_username'] or '-'})\n"
+            f"Агент: {m['owner_name'] or '-'} (ID: {m.get('owner_no', '-')})\n"
             f"Привязка: {binding}"
             f"{own_hint}",
             parse_mode="HTML",

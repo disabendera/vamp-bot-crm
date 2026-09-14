@@ -27,6 +27,10 @@ async def main():
     from services.shift_tracker import start_shift_tracker
     asyncio.create_task(start_shift_tracker(bot, interval_seconds=180))
 
+    # Запуск сервиса 6-часовых напоминаний и утреннего дайджеста
+    from services.reminder_service import start_reminder_service
+    asyncio.create_task(start_reminder_service(bot, interval_seconds=60))
+
     print("Бот запущен ✅")
     await dp.start_polling(bot)
 

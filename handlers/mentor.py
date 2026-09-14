@@ -94,8 +94,9 @@ async def panel_pending(call: CallbackQuery):
     if not pending:
         await call.message.answer("📥 Новых заявок нет")
     for u in pending:
+        agent_code = db.get_agent_code(u)
         await call.message.answer(
-            f"📥 Заявка: {u['full_name']} (@{u['username'] or '-'})\nID: {u['tg_id']}",
+            f"📥 Заявка: {u['full_name']}\nАгент ID: {agent_code}",
             reply_markup=kb.approve_kb(u["tg_id"]),
         )
     await call.answer()
@@ -110,8 +111,9 @@ async def panel_interviews(call: CallbackQuery):
         await call.message.answer("📝 Новых заявок на собеседование нет")
     for r in rows:
         app_status = r["app_status"] if "app_status" in r.keys() and r["app_status"] else "Не подтверждена"
+        agent_code = db.get_agent_code(r) or r["id"]
         await call.message.answer(
-            f"📝 #{r['id']} от {r['full_name']} (@{r['username'] or '-'}):\n\n{r['text']}\n\n"
+            f"📝 #{r['id']} от Агента ID {agent_code}:\n\n{r['text']}\n\n"
             f"🎛 Статус: <b>{app_status}</b>\n"
             f"Закрыть заявку: /close_{r['id']}",
             parse_mode="HTML",
@@ -435,6 +437,7 @@ class AForms(StatesGroup):
     partner_sheet_url = State()
     edit_partner_chat_id = State()
     edit_partner_sheet_url = State()
+    edit_partner_single_topic = State()
     mentor_id = State()
     leader_id = State()
     leader_team_name = State()
@@ -442,6 +445,7 @@ class AForms(StatesGroup):
     role_query = State()
     role_team_name = State()
     block_query = State()
+    agent_partner_query = State()
 
 
 async def is_admin(tg_id: int) -> bool:
@@ -456,7 +460,163 @@ async def admin_panel(message: Message):
     await message.answer("⚙️ Управление:", reply_markup=kb.admin_panel_kb)
 
 
+@router.callback_query(F.data == "adm:mark_paid")
+async def adm_mark_paid_ask(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await call.message.answer(
+        "⚠️ <b>Подтвердить выплату всем агентам?</b>\n\n"
+        "Текущие балансы будут обнулены.\n"
+        "Заработок за всё время сохранится в профилях.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да, выплата сделана", callback_data="adm:mark_paid_confirm"),
+            InlineKeyboardButton(text="🔴 Отмена", callback_data="adm:mark_paid_cancel"),
+        ]]),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:mark_paid_cancel")
+async def adm_mark_paid_cancel(call: CallbackQuery):
+    await call.message.edit_text("🔴 Выплата отменена")
+    await call.answer()
+
+
+@router.callback_query(F.data == "adm:mark_paid_confirm")
+async def adm_mark_paid_confirm(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    total = await db.mark_all_balances_paid()
+    await call.message.edit_text(
+        f"✅ Выплата отмечена.\n\nОбнулено текущих балансов: <b>${total:.2f}</b>\n"
+        "Заработок за всё время сохранён.",
+        parse_mode="HTML",
+    )
+    await call.answer("Баланс обнулён ✅")
+
+
+@router.callback_query(F.data == "adm:export_main_history")
+async def adm_export_main_history(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("❌ Доступно только администратору", show_alert=True)
+
+    rows = await db.get_main_sheet_history()
+    if not rows:
+        return await call.answer("📋 Изменений в листах «Заявки» и «Запуски» пока нет", show_alert=True)
+
+    await call.answer("⏳ Формирую файл истории...")
+
+    import csv
+    import io
+    from aiogram.types import BufferedInputFile
+    from datetime import datetime
+
+    output = io.StringIO()
+    writer = csv.writer(output, delimiter=';')
+    writer.writerow(["ID Заявки", "Модель", "Лист", "Колонка", "Старое значение", "Новое значение", "Редактор (Email)", "Дата и время"])
+
+    for r in rows:
+        writer.writerow([
+            r["interview_id"],
+            r["model_name"],
+            r["sheet_name"],
+            r["col_title"],
+            r["old_value"],
+            r["new_value"],
+            r["user_email"],
+            r["created_at"]
+        ])
+
+    filename = f"main_sheet_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    csv_bytes = output.getvalue().encode("utf-8-sig")
+    document = BufferedInputFile(csv_bytes, filename=filename)
+
+    await call.message.answer_document(
+        document=document,
+        caption=(
+            f"📜 <b>Логи основной таблицы</b>\n"
+            f"Листы: «Заявки» и «Запуски»\n"
+            f"Всего изменений: <b>{len(rows)}</b>"
+        ),
+        parse_mode="HTML"
+    )
+
+
 # --- партнёры ---
+
+def agent_partners_kb(agent_tg_id: int, partners, assigned) -> InlineKeyboardMarkup:
+    assigned_ids = {p["id"] for p in assigned}
+    buttons = [
+        [InlineKeyboardButton(
+            text=f"{'✅' if p['id'] in assigned_ids else '⬜'} {p['name']}",
+            callback_data=f"agpart:{agent_tg_id}:{p['id']}",
+        )]
+        for p in partners
+    ]
+    buttons.append([InlineKeyboardButton(text="✅ Готово", callback_data=f"agpart_done:{agent_tg_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+@router.callback_query(F.data == "adm:agent_partners")
+async def adm_agent_partners(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await state.set_state(AForms.agent_partner_query)
+    await call.message.answer(
+        "🔗 Отправьте внутренний ID агента, Telegram ID или @юзернейм:",
+        reply_markup=kb.cancel_kb,
+    )
+    await call.answer()
+
+
+@router.message(AForms.agent_partner_query)
+async def adm_agent_partners_find(message: Message, state: FSMContext):
+    agent = await db.find_agent(message.text or "")
+    if not agent:
+        return await message.answer("❌ Агент не найден. Попробуйте ещё раз", reply_markup=kb.cancel_kb)
+    await state.clear()
+    partners = await db.get_partners()
+    if not partners:
+        return await message.answer("❌ Сначала добавьте хотя бы одного партнёра", reply_markup=kb.admin_menu)
+    assigned = await db.get_agent_partners(agent["tg_id"])
+    assigned_text = ", ".join(p["name"] for p in assigned) or "нет"
+    await message.answer(
+        f"🔗 <b>{agent['full_name'] or agent['tg_id']}</b> (ID: {db.get_agent_code(agent)})\n"
+        f"Назначены по порядку: <b>{assigned_text}</b>\n\n"
+        "Нажимайте на партнёров, чтобы добавить или убрать. Порядок добавления используется в ротации.",
+        parse_mode="HTML",
+        reply_markup=agent_partners_kb(agent["tg_id"], partners, assigned),
+    )
+
+
+@router.callback_query(F.data.startswith("agpart:"))
+async def adm_agent_partner_toggle(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    _, agent_tg_id, partner_id = call.data.split(":")
+    agent_tg_id, partner_id = int(agent_tg_id), int(partner_id)
+    await db.toggle_agent_partner(agent_tg_id, partner_id)
+    agent = await db.get_user(agent_tg_id)
+    partners = await db.get_partners()
+    assigned = await db.get_agent_partners(agent_tg_id)
+    assigned_text = ", ".join(p["name"] for p in assigned) or "нет"
+    await call.message.edit_text(
+        f"🔗 <b>{agent['full_name'] or agent_tg_id}</b> (ID: {db.get_agent_code(agent)})\n"
+        f"Назначены по порядку: <b>{assigned_text}</b>\n\n"
+        "Нажимайте на партнёров, чтобы добавить или убрать. Порядок добавления используется в ротации.",
+        parse_mode="HTML",
+        reply_markup=agent_partners_kb(agent_tg_id, partners, assigned),
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("agpart_done:"))
+async def adm_agent_partner_done(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await call.message.edit_text("✅ Назначение партнёров сохранено")
+    await call.answer()
 
 @router.callback_query(F.data == "adm:add_partner")
 async def adm_add_partner(call: CallbackQuery, state: FSMContext):
@@ -478,7 +638,7 @@ async def adm_add_partner_name(message: Message, state: FSMContext):
     )
     await message.answer(
         f"Партнёр: <b>{name}</b>\n\n"
-        f"Отправьте Telegram Chat ID (начинается с -100...) или перешлите сообщение из чата партнёра:\n"
+        f"Отправьте Telegram Chat ID (начинается с -100...) или ссылку на любой топик партнёра:\n"
         f"<i>(Или нажмите «⏭ Пропустить», если чат не требуется)</i>",
         parse_mode="HTML",
         reply_markup=skip_kb,
@@ -489,7 +649,10 @@ async def adm_add_partner_name(message: Message, state: FSMContext):
 async def adm_add_partner_chat(message: Message, state: FSMContext):
     chat_id = ""
     if message.text != "⏭ Пропустить":
-        if message.forward_from_chat:
+        parsed_chat, _ = db.parse_topic_input(message.text)
+        if parsed_chat:
+            chat_id = parsed_chat
+        elif message.forward_from_chat:
             chat_id = str(message.forward_from_chat.id)
         else:
             chat_id = message.text.strip()
@@ -514,9 +677,12 @@ async def adm_add_partner_sheet(message: Message, state: FSMContext):
     sheet_url = "" if message.text == "⏭ Пропустить" else message.text.strip()
     name = data["partner_name"]
     chat_id = data.get("partner_chat_id", "")
-    await db.add_partner(name, chat_id=chat_id, sheet_url=sheet_url)
-    user = await db.get_user(message.from_user.id)
-    await message.answer(f"✅ Партнёр «{name}» успешно добавлен!", reply_markup=kb.admin_menu)
+    partner_id = await db.add_partner(name, chat_id=chat_id, sheet_url=sheet_url)
+    await message.answer(
+        f"✅ Партнёр «{name}» успешно добавлен!\n\n"
+        f"Задайте топики этапов в «⚙️ Управление» ➔ «🤝 Партнёры».",
+        reply_markup=kb.admin_menu,
+    )
 
 
 @router.callback_query(F.data == "adm:partners")
@@ -528,20 +694,97 @@ async def adm_partners(call: CallbackQuery):
         await call.message.answer("Партнёров нет. Добавьте через «➕ Добавить партнёра»")
     else:
         for pt in partners:
-            chat_str = f"<code>{pt['chat_id']}</code>" if pt['chat_id'] else "❌ Не настроен"
-            sheet_str = f"<code>{pt['sheet_url']}</code>" if pt['sheet_url'] else "❌ Не настроен"
+            pt_dict = dict(pt)
+            chat_str = f"<code>{pt_dict.get('chat_id')}</code>" if pt_dict.get('chat_id') else "❌ Не настроен"
+            sheet_str = f"<code>{pt_dict.get('sheet_url')}</code>" if pt_dict.get('sheet_url') else "❌ Не настроен"
+            
+            app_t = pt_dict.get("topic_applications") or "❌"
+            conf_t = pt_dict.get("topic_confirmations") or "❌"
+            sobes_t = pt_dict.get("topic_sobes") or "❌"
+            reg_t = pt_dict.get("topic_registration") or "❌"
+            s1_t = pt_dict.get("topic_shift1") or "❌"
+            s2_t = pt_dict.get("topic_shift2") or "❌"
+            canc_t = pt_dict.get("topic_cancelled") or "❌"
+
             text = (
                 f"🤝 <b>Партнёр: {pt['name']}</b> (ID: {pt['id']})\n"
                 f"💬 Chat ID: {chat_str}\n"
-                f"📊 Google Sheet Webhook: {sheet_str}"
+                f"📊 Webhook Таблицы: {sheet_str}\n\n"
+                f"📌 <b>Топики этапов:</b>\n"
+                f"1️⃣ Заявки: <code>{app_t}</code>\n"
+                f"2️⃣ Подтверждения: <code>{conf_t}</code>\n"
+                f"3️⃣ Прошла собес: <code>{sobes_t}</code>\n"
+                f"4️⃣ Регистрация: <code>{reg_t}</code>\n"
+                f"5️⃣ 1-я смена: <code>{s1_t}</code>\n"
+                f"6️⃣ 2-я смена: <code>{s2_t}</code>\n"
+                f"7️⃣ Слив: <code>{canc_t}</code>"
             )
             buttons = [
                 [InlineKeyboardButton(text="✏️ Чат ID", callback_data=f"setpchat:{pt['id']}"),
                  InlineKeyboardButton(text="✏️ Sheet URL", callback_data=f"setpsheet:{pt['id']}")],
-                [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delpart:{pt['id']}")]
+                [InlineKeyboardButton(text="✏️ 1. Заявки", callback_data=f"setptop:{pt['id']}:topic_applications"),
+                 InlineKeyboardButton(text="✏️ 2. Подтверждения", callback_data=f"setptop:{pt['id']}:topic_confirmations")],
+                [InlineKeyboardButton(text="✏️ 3. Прошла собес", callback_data=f"setptop:{pt['id']}:topic_sobes"),
+                 InlineKeyboardButton(text="✏️ 4. Регистрация", callback_data=f"setptop:{pt['id']}:topic_registration")],
+                [InlineKeyboardButton(text="✏️ 5. 1-я смена", callback_data=f"setptop:{pt['id']}:topic_shift1"),
+                 InlineKeyboardButton(text="✏️ 6. 2-я смена", callback_data=f"setptop:{pt['id']}:topic_shift2")],
+                [InlineKeyboardButton(text="✏️ 7. Слив", callback_data=f"setptop:{pt['id']}:topic_cancelled")],
+                [InlineKeyboardButton(text="🗑 Удалить партнёра", callback_data=f"delpart:{pt['id']}")]
             ]
             await call.message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await call.answer()
+
+
+@router.callback_query(F.data.startswith("setptop:"))
+async def set_ptopic_start(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    parts = call.data.split(":")
+    partner_id = int(parts[1])
+    topic_key = parts[2]
+    
+    topic_labels = {
+        "topic_applications": "1. Заявки",
+        "topic_confirmations": "2. Подтверждения",
+        "topic_sobes": "3. Прошла собес",
+        "topic_registration": "4. Регистрация",
+        "topic_shift1": "5. Первая смена",
+        "topic_shift2": "6. Вторая смена",
+        "topic_cancelled": "7. Слив"
+    }
+    label = topic_labels.get(topic_key, topic_key)
+    
+    await state.update_data(edit_partner_id=partner_id, edit_topic_key=topic_key)
+    await state.set_state(AForms.edit_partner_single_topic)
+    await call.message.answer(
+        f"Отправьте ссылку на топик <b>«{label}»</b> (например <code>https://t.me/c/1234567890/45</code>)\n"
+        f"или просто числовой ID топика (например <code>45</code>):\n"
+        f"<i>(Отправьте 0 для сброса)</i>",
+        parse_mode="HTML",
+        reply_markup=kb.cancel_kb,
+    )
+    await call.answer()
+
+
+@router.message(AForms.edit_partner_single_topic)
+async def set_ptopic_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    partner_id = data["edit_partner_id"]
+    topic_key = data["edit_topic_key"]
+    
+    val = message.text.strip()
+    if val == "0":
+        await db.update_partner_topic(partner_id, topic_key, None)
+        return await message.answer("✅ Топик сброшен", reply_markup=kb.admin_menu)
+        
+    chat_id, topic_id = db.parse_topic_input(val)
+    if topic_id is None:
+        return await message.answer("❌ Не удалось распознать топик. Отправьте ссылку из Telegram или числовой ID.")
+        
+    await db.update_partner_topic(partner_id, topic_key, topic_id, chat_id=chat_id)
+    await message.answer(f"✅ Топик обновлен: ID <code>{topic_id}</code>" + (f" (Chat ID: <code>{chat_id}</code>)" if chat_id else ""),
+                         parse_mode="HTML", reply_markup=kb.admin_menu)
 
 
 @router.callback_query(F.data.startswith("setpchat:"))
@@ -552,7 +795,7 @@ async def set_pchat_start(call: CallbackQuery, state: FSMContext):
     await state.update_data(edit_partner_id=partner_id)
     await state.set_state(AForms.edit_partner_chat_id)
     await call.message.answer(
-        "Отправьте новый Telegram Chat ID (начинается с -100...) или перешлите сообщение из чата партнёра:",
+        "Отправьте новый Telegram Chat ID (начинается с -100...) или ссылку на любой топик партнёра:",
         reply_markup=kb.cancel_kb,
     )
     await call.answer()
@@ -563,7 +806,10 @@ async def set_pchat_save(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
     partner_id = data["edit_partner_id"]
-    if message.forward_from_chat:
+    parsed_chat, _ = db.parse_topic_input(message.text)
+    if parsed_chat:
+        chat_id = parsed_chat
+    elif message.forward_from_chat:
         chat_id = str(message.forward_from_chat.id)
     else:
         chat_id = message.text.strip()
@@ -642,7 +888,7 @@ async def adm_demote_list(call: CallbackQuery):
     else:
         buttons = [
             [InlineKeyboardButton(
-                text=f"⬇️ {m['full_name'] or m['tg_id']} (@{m['username'] or '-'})",
+                text=f"⬇️ {m['full_name']} (ID: {m.get('agent_code') or (1000 + m['id'])})",
                 callback_data=f"demote:{m['tg_id']}",
             )]
             for m in mentors
@@ -676,7 +922,7 @@ async def adm_add_leader(call: CallbackQuery, state: FSMContext):
         return await call.answer("Нет прав", show_alert=True)
     await state.set_state(AForms.leader_id)
     await call.message.answer(
-        "👑 Отправьте номер агента, Telegram ID или @юзернейм будущего лидера:",
+        "👑 Отправьте внутренний ID агента (например 1001), Telegram ID или @юзернейм будущего лидера:",
         reply_markup=kb.cancel_kb,
     )
     await call.answer()
@@ -687,10 +933,11 @@ async def adm_add_leader_find(message: Message, state: FSMContext):
     agent = await db.find_agent(message.text or "")
     if not agent:
         return await message.answer("❌ Агент не найден. Попробуйте ещё раз", reply_markup=kb.cancel_kb)
-    await state.update_data(leader_tg_id=agent["tg_id"], leader_name=agent["full_name"] or str(agent["tg_id"]))
+    agent_code = db.get_agent_code(agent)
+    await state.update_data(leader_tg_id=agent["tg_id"], leader_name=f"{agent['full_name']} (ID: {agent_code})")
     await state.set_state(AForms.leader_team_name)
     await message.answer(
-        f"Лидер: <b>{agent['full_name'] or agent['tg_id']}</b>\n\n"
+        f"Лидер: <b>{agent['full_name']}</b> (ID: {agent_code})\n\n"
         f"Теперь введите название команды:",
         parse_mode="HTML",
         reply_markup=kb.cancel_kb,
@@ -724,7 +971,7 @@ async def adm_agent_path(call: CallbackQuery, state: FSMContext):
         return await call.answer("Нет прав", show_alert=True)
     await state.set_state(AForms.path_query)
     await call.message.answer(
-        "🧭 Отправьте номер агента, Telegram ID или @юзернейм:",
+        "🧭 Отправьте внутренний ID агента (например 1001), Telegram ID или @юзернейм:",
         reply_markup=kb.cancel_kb,
     )
     await call.answer()
@@ -806,7 +1053,7 @@ async def adm_team_view(call: CallbackQuery):
     models = await db.team_models(team["id"])
 
     agent_lines = [
-        f"{i}. №{a['id']} {a['full_name'] or '-'} (@{a['username'] or '-'})"
+        f"{i}. Агент ID {a.get('agent_code') or (1000 + a['id'])} {a['full_name'] or '-'}"
         f"{' 👑' if a['tg_id'] == team['leader_tg_id'] else ''}"
         for i, a in enumerate(agents, 1)
     ] or ["- пусто -"]
@@ -814,7 +1061,7 @@ async def adm_team_view(call: CallbackQuery):
     active = [m for m in models if m["status"] == "active"]
     dropped = [m for m in models if m["status"] == "dropped"]
     model_lines = [
-        f"{i}. <b>{m['name']}</b> - {m['shifts']} смен(-ы) (агент №{m['owner_no']})"
+        f"{i}. <b>{m['name']}</b> - {m['shifts']} смен(-ы) (агент ID {m['owner_no']})"
         for i, m in enumerate(active, 1)
     ] or ["- пусто -"]
 
@@ -822,7 +1069,7 @@ async def adm_team_view(call: CallbackQuery):
         f"👥 <b>КОМАНДА «{team['name'].upper()}»</b>\n"
         f"━━━━━━━━━━━━━━━\n"
         f"👑 Лидер: <b>{leader['full_name'] if leader else '-'}</b> "
-        f"(@{leader['username'] if leader else '-'})\n"
+        f"(ID: {leader.get('agent_code') if leader else '-'})\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🧑 <b>Агенты - {len(agents)}</b>\n" + "\n".join(agent_lines) +
         f"\n━━━━━━━━━━━━━━━\n"
@@ -847,40 +1094,27 @@ async def delete_team_ask(call: CallbackQuery):
     team = await db.get_team(int(call.data.split(":")[1]))
     if not team:
         return await call.answer("Команда не найдена", show_alert=True)
-    agents = await db.team_agents(team["id"])
     await call.message.answer(
-        f"⚠️ <b>Удалить команду «{team['name']}»?</b>\n\n"
-        f"Агенты команды ({len(agents)}) перейдут в соло, "
-        f"лидер станет обычным агентом\n"
-        f"Действие необратимо",
-        parse_mode="HTML",
-        reply_markup=confirm_delete_kb(f"cfdelteam:{team['id']}"),
+        f"🗑 Удалить команду «{team['name']}»?\nАгенты этой команды перейдут в статус «соло»",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"delteamc:{team['id']}"),
+            InlineKeyboardButton(text="🔴 Отмена", callback_data="icancel"),
+        ]]),
     )
     await call.answer()
 
 
-@router.callback_query(F.data.startswith("cfdelteam:"))
-async def delete_team_confirm(call: CallbackQuery, bot: Bot):
+@router.callback_query(F.data.startswith("delteamc:"))
+async def delete_team_confirm(call: CallbackQuery):
     if not await is_admin(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    team = await db.get_team(int(call.data.split(":")[1]))
-    if not team:
-        return await call.answer("Команда не найдена", show_alert=True)
-    leader_tg = await db.delete_team(team["id"])
-    await call.message.edit_text(f"🗑 Команда «{team['name']}» удалена")
-    if leader_tg:
-        try:
-            await bot.send_message(
-                leader_tg,
-                f"Команда «{team['name']}» расформирована, вы снова агент",
-                reply_markup=kb.main_menu,
-            )
-        except Exception:
-            pass
-    await call.answer("Удалено ✅")
+    team_id = int(call.data.split(":")[1])
+    await db.delete_team(team_id)
+    await call.message.edit_text("✅ Команда удалена, агенты переведены в соло")
+    await call.answer()
 
 
-# ---------- Роли: выдать / забрать (только админ) ----------
+# ---------- Управление ролями (только админ) ----------
 
 ROLE_TITLES = {"agent": "🧑 Агент", "leader": "👑 Лидер",
                "mentor": "🎓 Наставник", "admin": "⚙️ Админ"}
@@ -904,7 +1138,7 @@ async def adm_roles(call: CallbackQuery, state: FSMContext):
         return await call.answer("Нет прав", show_alert=True)
     await state.set_state(AForms.role_query)
     await call.message.answer(
-        "🎭 Отправьте номер агента, Telegram ID или @юзернейм пользователя:",
+        "🎭 Отправьте внутренний ID агента (например 1001), Telegram ID или @юзернейм:",
         reply_markup=kb.cancel_kb,
     )
     await call.answer()
@@ -918,8 +1152,9 @@ async def adm_roles_find(message: Message, state: FSMContext):
                                     reply_markup=kb.cancel_kb)
     await state.clear()
     current = ROLE_TITLES.get(agent["role"], agent["role"])
+    agent_code = db.get_agent_code(agent)
     await message.answer(
-        f"🎭 <b>{agent['full_name'] or agent['tg_id']}</b> (№{agent['id']}, @{agent['username'] or '-'})\n"
+        f"🎭 <b>{agent['full_name']}</b> (ID: {agent_code})\n"
         f"Текущая роль: <b>{current}</b>\n\n"
         f"Выберите новую роль (текущую роль можно забрать, выдав «Агент»):",
         parse_mode="HTML",
