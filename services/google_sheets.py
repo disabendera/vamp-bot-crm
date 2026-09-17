@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 async def send_interview_to_sheet(sheet_url: str, payload: dict) -> bool:
     """
-    Отправляет JSON с данными новой заявки в Google Apps Script конкретного партнёра.
+    Отправляет JSON с данными модели в Google Apps Script конкретного партнёра.
     """
     if not sheet_url or not sheet_url.strip():
         logger.warning("sheet_url не указан, пропуск отправки в Google Таблицу")
@@ -19,7 +19,7 @@ async def send_interview_to_sheet(sheet_url: str, payload: dict) -> bool:
             async with session.post(sheet_url.strip(), json=payload, allow_redirects=True) as resp:
                 text = await resp.text()
                 if resp.status in (200, 201, 302):
-                    logger.info(f"Ответ от Google Таблицы (заявка #{payload.get('interview_id')}): {text}")
+                    logger.info(f"Ответ от Google Таблицы (модель {payload.get('model_code')}): {text}")
                     return True
                 else:
                     logger.error(f"Ошибка отправки в Google Таблицу ({resp.status}): {text}")
@@ -30,4 +30,3 @@ async def send_interview_to_sheet(sheet_url: str, payload: dict) -> bool:
     except Exception as e:
         logger.exception(f"Исключение при отправке в Google Таблицу ({sheet_url}): {e}")
         return False
-

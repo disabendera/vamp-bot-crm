@@ -124,14 +124,15 @@ async def panel_interviews(call: CallbackQuery):
         await call.message.answer("📝 Новых заявок на собеседование нет")
     for r in rows:
         app_status = r["app_status"] if "app_status" in r.keys() and r["app_status"] else "Не подтверждена"
-        agent_code = db.get_agent_code(r) or r["id"]
+        agent_code = r["owner_agent_code"] or (1000 + r["owner_no"] if r["owner_no"] else r["owner_tg_id"])
+        model_code = r["model_code"]
         await call.message.answer(
-            f"📝 #{r['id']} от Агента ID {agent_code}:\n\n{r['text']}\n\n"
+            f"📝 ID модели {model_code} от Агента ID {agent_code}:\n\n{r['text']}\n\n"
             f"🎛 Статус: <b>{app_status}</b>\n"
-            f"Закрыть заявку: /close_{r['id']}",
+            f"Закрыть заявку: /close_{model_code}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="🔄 Изменить статус", callback_data=f"ist:{r['id']}")
+                InlineKeyboardButton(text="🔄 Изменить статус", callback_data=f"ist:{model_code}")
             ]]),
         )
     await call.answer()
@@ -141,17 +142,17 @@ async def panel_interviews(call: CallbackQuery):
 async def interview_status_menu(call: CallbackQuery):
     if not await is_staff(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    interview_id = int(call.data.split(":")[1])
+    model_code = call.data.split(":")[1]
     rows, row = [], []
     for i, st in enumerate(db.APP_STATUSES):
-        row.append(InlineKeyboardButton(text=st, callback_data=f"sts:{interview_id}:{i}"))
+        row.append(InlineKeyboardButton(text=st, callback_data=f"sts:{model_code}:{i}"))
         if len(row) == 2:
             rows.append(row)
             row = []
     if row:
         rows.append(row)
     await call.message.answer(
-        f"🎛 Новый статус для заявки #{interview_id}:",
+        f"🎛 Новый статус для модели {model_code}:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
     await call.answer()
@@ -161,10 +162,10 @@ async def interview_status_menu(call: CallbackQuery):
 async def interview_status_set(call: CallbackQuery):
     if not await is_staff(call.from_user.id):
         return await call.answer("Нет прав", show_alert=True)
-    _, interview_id, idx = call.data.split(":")
+    _, model_code, idx = call.data.split(":")
     status = db.APP_STATUSES[int(idx)]
-    await db.set_app_status(int(interview_id), status)
-    await call.message.edit_text(f"✅ Заявке #{interview_id} установлен статус: <b>{status}</b>",
+    await db.set_app_status(model_code, status)
+    await call.message.edit_text(f"✅ Модели {model_code} установлен статус: <b>{status}</b>",
                                  parse_mode="HTML")
     await call.answer("Статус обновлён ✅")
 
@@ -173,9 +174,9 @@ async def interview_status_set(call: CallbackQuery):
 async def close_interview(message: Message):
     if not await is_staff(message.from_user.id):
         return
-    interview_id = int(message.text.split("_")[1])
-    await db.close_interview(interview_id)
-    await message.answer(f"✅ Заявка #{interview_id} закрыта")
+    model_code = message.text.split("_")[1]
+    await db.close_interview(model_code)
+    await message.answer(f"✅ Заявка по модели {model_code} закрыта")
 
 
 # ---------- Уроки: список, просмотр, правка ----------
@@ -459,6 +460,7 @@ class AForms(StatesGroup):
     role_team_name = State()
     block_query = State()
     agent_partner_query = State()
+    shift_collection_time = State()
 
 
 async def is_admin(tg_id: int) -> bool:
@@ -471,6 +473,45 @@ async def admin_panel(message: Message):
     if not await is_admin(message.from_user.id):
         return
     await message.answer("⚙️ Управление:", reply_markup=kb.admin_panel_kb)
+
+
+@router.callback_query(F.data == "adm:collect_shifts")
+async def adm_collect_shifts(call: CallbackQuery):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    from services.shift_tracker import collect_shifts
+    asyncio.create_task(collect_shifts(call.bot))
+    await call.answer("Сбор запущен в фоне ✅")
+    await call.message.answer("🔄 Сбор отчётников запущен. Бот продолжает работать, результат появится в логах и уведомлениях.")
+
+
+@router.callback_query(F.data == "adm:shift_time")
+async def adm_shift_time(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    current = await db.get_setting("shift_collection_time") or "23:00"
+    await state.set_state(AForms.shift_collection_time)
+    await call.message.answer(
+        f"⏰ Текущее время ежедневного сбора: <b>{current}</b>\n"
+        "Отправьте новое время в формате HH:MM (по Москве).",
+        parse_mode="HTML",
+        reply_markup=kb.cancel_kb,
+    )
+    await call.answer()
+
+
+@router.message(AForms.shift_collection_time)
+async def adm_shift_time_save(message: Message, state: FSMContext):
+    value = (message.text or "").strip()
+    try:
+        hour, minute = (int(part) for part in value.split(":", 1))
+        if len(value) != 5 or value[2] != ":" or not (0 <= hour <= 23 and 0 <= minute <= 59):
+            raise ValueError
+    except (TypeError, ValueError):
+        return await message.answer("❌ Нужен формат HH:MM, например 21:30", reply_markup=kb.cancel_kb)
+    await db.set_setting("shift_collection_time", value)
+    await state.clear()
+    await message.answer(f"✅ Ежедневный сбор смен назначен на <b>{value}</b>", parse_mode="HTML", reply_markup=kb.admin_menu)
 
 
 @router.callback_query(F.data == "adm:mark_paid")
@@ -527,11 +568,11 @@ async def adm_export_main_history(call: CallbackQuery):
 
     output = io.StringIO()
     writer = csv.writer(output, delimiter=';')
-    writer.writerow(["ID Заявки", "Модель", "Лист", "Колонка", "Старое значение", "Новое значение", "Редактор (Email)", "Дата и время"])
+    writer.writerow(["ID модели", "Модель", "Лист", "Колонка", "Старое значение", "Новое значение", "Редактор (Email)", "Дата и время"])
 
     for r in rows:
         writer.writerow([
-            r["interview_id"],
+            r["model_code"],
             r["model_name"],
             r["sheet_name"],
             r["col_title"],

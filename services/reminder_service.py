@@ -14,33 +14,33 @@ SEP = "━━━━━━━━━━━━━━━"
 last_morning_digest_date = ""
 
 
-def build_confirm_buttons(interview_id: int) -> InlineKeyboardMarkup:
+def build_confirm_buttons(model_code: int | str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Модель придёт", callback_data=f"agent_confirm:{interview_id}"),
-        InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"agent_reject:{interview_id}"),
+        InlineKeyboardButton(text="✅ Модель придёт", callback_data=f"agent_confirm:{model_code}"),
+        InlineKeyboardButton(text="🚫 Отклонить", callback_data=f"agent_reject:{model_code}"),
     ]])
 
 
 async def check_6h_confirm_reminders(bot: Bot):
     """
-    Проверяет заявки со статусом 'Принято', для которых кнопка подтверждения еще не отправлялась.
+    Проверяет модели со статусом 'Принято', для которых кнопка подтверждения еще не отправлялась.
     Если до собеседования осталось <= 6 часов, отправляет агенту сообщение с кнопками подтверждения.
     """
     try:
-        # заявки, где партнёр принял, а агент ещё не ответил (статус всё ещё «Принято»)
-        accepted_interviews = await db.get_unanswered_accepted_interviews()
-        if not accepted_interviews:
+        # Модели, где партнёр принял, а агент ещё не ответил (статус всё ещё «Принято»).
+        accepted_models = await db.get_unanswered_accepted_interviews()
+        if not accepted_models:
             return
 
         msk_now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=3)
 
-        for inv in accepted_interviews:
-            i_dict = dict(inv)
-            interview_id = i_dict["id"]
-            agent_tg_id = i_dict["tg_id"]
-            sobes_date = i_dict.get("sobes_date") or ""
-            sobes_time = i_dict.get("sobes_time") or ""
-            text = i_dict.get("text") or ""
+        for model in accepted_models:
+            m_dict = dict(model)
+            model_code = m_dict["model_code"]
+            agent_tg_id = m_dict["owner_tg_id"]
+            sobes_date = m_dict.get("sobes_date") or ""
+            sobes_time = m_dict.get("sobes_time") or ""
+            text = m_dict.get("application_text") or ""
 
             sobes_dt = db.parse_interview_datetime(sobes_date, sobes_time, text)
 
@@ -51,7 +51,7 @@ async def check_6h_confirm_reminders(bot: Bot):
             # До собеса осталось <= 6 часов (или дата не распарсилась/прошла) -> отправляем кнопки!
             model_nm = extract_model_name_from_text(text)
             msg_text = (
-                f"🟢 <b>СОБЕСЕДОВАНИЕ №{interview_id} ЧЕРЕЗ 6 ЧАСОВ</b>\n"
+                f"🟢 <b>СОБЕСЕДОВАНИЕ · ID МОДЕЛИ {model_code} · ЧЕРЕЗ 6 ЧАСОВ</b>\n"
                 f"{SEP}\n"
                 + (f"💚 Модель: <b>{model_nm}</b>\n" if model_nm else "")
                 + f"📗 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n"
@@ -65,10 +65,10 @@ async def check_6h_confirm_reminders(bot: Bot):
                     agent_tg_id,
                     msg_text,
                     parse_mode="HTML",
-                    reply_markup=build_confirm_buttons(interview_id)
+                    reply_markup=build_confirm_buttons(model_code)
                 )
-                await db.mark_reminder_6h_sent(interview_id)
-                logger.info(f"Агенту {agent_tg_id} отправлено 6-часовое напоминание по собеседованию №{interview_id}")
+                await db.mark_reminder_6h_sent(model_code)
+                logger.info(f"Агенту {agent_tg_id} отправлено 6-часовое напоминание по модели {model_code}")
             except Exception as e:
                 logger.error(f"Ошибка отправки кнопок подтверждения агенту {agent_tg_id}: {e}")
 
@@ -99,7 +99,7 @@ async def check_morning_digest(bot: Bot):
                     s_time = inv.get("sobes_time") or "-"
                     status = inv.get("app_status") or "Новая"
                     lines.append(
-                        f"<b>{idx}. {s_time} МСК</b> · заявка №{inv['id']}\n"
+                        f"<b>{idx}. {s_time} МСК</b> · ID модели {inv['model_code']}\n"
                         f"✅ Статус: {status}"
                     )
 

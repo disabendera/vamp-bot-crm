@@ -748,9 +748,9 @@ async def model_search_run(message: Message, state: FSMContext):
     for m in models:
         team = await db.get_team(m["owner_team"]) if m["owner_team"] else None
         binding = f"👥 Команда «{team['name']}»" if team else "🧍 Соло"
-        own_hint = f"\nУправление: /model_{m['id']}" if m["owner_tg"] == viewer["tg_id"] else ""
+        own_hint = f"\nУправление: /model_{m['model_code']}" if m["owner_tg"] == viewer["tg_id"] else ""
         await message.answer(
-            f"💵 <b>МОДЕЛЬ #{m['id']}</b>\n"
+            f"💵 <b>МОДЕЛЬ #{m['model_code']}</b>\n"
             f"━━━━━━━━━━━━━━━\n"
             f"Имя: <b>{m['name']}</b>\n"
             f"📞 Телефон: {m['phone'] or '-'}\n"
@@ -795,6 +795,7 @@ async def team_models_list(call: CallbackQuery):
         return await call.answer()
     lines = [
         f"{i}. <b>{m['name']}</b>"
+        f" · ID <code>{m['model_code']}</code>"
         f"{' ' + m['phone'] if m['phone'] else ''}"
         f"{' @' + m['username'] if m['username'] else ''}"
         f" - {m['shifts']} смен(-ы)\n"

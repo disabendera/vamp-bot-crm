@@ -70,6 +70,8 @@ admin_panel_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🎓 Назначить наставника", callback_data="adm:add_mentor")],
     [InlineKeyboardButton(text="⬇️ Снять наставника", callback_data="adm:demote")],
     [InlineKeyboardButton(text="📜 Логи основной таблицы", callback_data="adm:export_main_history")],
+    [InlineKeyboardButton(text="🔄 Собрать смены сейчас", callback_data="adm:collect_shifts")],
+    [InlineKeyboardButton(text="⏰ Время сбора смен", callback_data="adm:shift_time")],
     [InlineKeyboardButton(text="💸 Выплата сделана — обнулить балансы", callback_data="adm:mark_paid")],
 ])
 

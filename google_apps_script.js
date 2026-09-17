@@ -1,11 +1,11 @@
-var BOT_WEBHOOK_URL = "https://goldmine-pruning-handshake.ngrok-free.dev/webhook/sheet_status";
+var BOT_WEBHOOK_URL = "https://lagging-prevail-cure.ngrok-free.dev/webhook/sheet_status";
 var WEBHOOK_SECRET = "ca5xjwy5ex4QahythOagtse0lpoI94RtYEJA2CWBDRtO97rGF2txPlA403vE8qpS";
 
 // 1. ID таблицы-шаблона отчётника
 var TEMPLATE_SHEET_ID = "1FagJffQuPtDlvN0NkRlNwRgkNlFC9bOBHR1LoyOt1-c";
 
 // 2. Email сервисного аккаунта бота для автоматической выдачи прав на чтение
-var SERVICE_ACCOUNT_EMAIL = "crm-bot@crm-bot-505921.iam.gserviceaccount.com";
+var SERVICE_ACCOUNT_EMAIL = "crm-bot@crm-bot-507115.iam.gserviceaccount.com";
 
 var NOTIFY_COLUMNS = [
   "статус",
@@ -40,22 +40,23 @@ function doPost(e) {
         if (lastCol < 1) continue;
 
         var headers = sh.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
-        var idCol = -1, confCol = -1;
+        var idCol = -1, confCol = -1, modelNameCol = -1;
 
         for (var c = 0; c < headers.length; c++) {
           var hName = String(headers[c]).trim().toLowerCase();
           if ((hName === "id" || hName === "id заявки" || hName === "№" || hName === "№ заявки") && hName.indexOf("агент") === -1 && hName.indexOf("agent") === -1) idCol = c + 1;
           if (hName.indexOf("подтвержд") !== -1 || hName.indexOf("подтверждение") !== -1) confCol = c + 1;
+          if (hName === "фио" || hName === "фио модели") modelNameCol = c + 1;
         }
 
         if (confCol !== -1) {
           var lastRow = sh.getLastRow();
           for (var r = headerRowIndex + 1; r <= lastRow; r++) {
             var rowId = idCol !== -1 ? String(sh.getRange(r, idCol).getValue()).trim() : "";
-            var targetId = data.interview_id ? String(data.interview_id).trim() : "";
+            var targetId = data.model_code ? String(data.model_code).trim() : "";
 
             var isMatch = false;
-            // 🎯 Единственный способ сопоставления — точный ID заявки.
+            // 🎯 Единственный способ сопоставления — точный ID модели.
             if (targetId) {
               if (rowId && (rowId === targetId || parseInt(rowId, 10) === parseInt(targetId, 10))) {
                 isMatch = true;
@@ -68,8 +69,16 @@ function doPost(e) {
               }
             }
 
+            // Для старых строк без ID модели используем точное совпадение ФИО.
+            if (!isMatch && modelNameCol !== -1 && data.model_name) {
+              var rowModelName = String(sh.getRange(r, modelNameCol).getValue()).trim();
+              isMatch = rowModelName === String(data.model_name).trim();
+            }
+
             if (isMatch) {
+              if (idCol !== -1 && data.model_code) sh.getRange(r, idCol).setValue(data.model_code);
               sh.getRange(r, confCol).setValue(data.status || "✅ Подтверждено");
+              if (modelNameCol !== -1 && data.model_name) sh.getRange(r, modelNameCol).setValue(data.model_name);
               updatedSheets.push(sh.getName() + " (строка " + r + ")");
             }
           }
@@ -95,6 +104,7 @@ function doPost(e) {
     var modelName = (data.model_name && String(data.model_name).trim().length > 0) ? String(data.model_name).trim() : extractModelName(data.form);
     var modelTg = (data.model_tg && String(data.model_tg).trim().length > 0) ? String(data.model_tg).trim() : extractTgUsername(data.form);
     var modelPhone = (data.model_phone && String(data.model_phone).trim().length > 0) ? String(data.model_phone).trim() : extractModelPhone(data.form);
+    var modelCode = data.model_code ? String(data.model_code).trim() : "";
 
     // 🪄 Авто-создание персонального отчётника модели
     var createdReportUrl = createReportSheetForModel(modelName, modelTg);
@@ -111,7 +121,7 @@ function doPost(e) {
       } else if (h === "телефон" || h === "номер" || h === "телефон модели") {
         newRow[i] = modelPhone;
       } else if (h === "id" || h === "id заявки") {
-        newRow[i] = data.interview_id || "";
+        newRow[i] = data.model_code || "";
       } else if (h === "id агента" || h === "айди агента" || h === "агент id" || h === "номер агента" || (h.indexOf("агент") !== -1 && h.indexOf("подтвержд") === -1)) {
         newRow[i] = data.agent_id || data.agent_code || "";
       } else {
@@ -141,7 +151,7 @@ function doPost(e) {
           break;
         }
       }
-      sendReportUrlToBot(data.interview_id, modelName, createdReportUrl);
+      sendReportUrlToBot(data.model_code, modelName, createdReportUrl);
     }
 
     return ContentService.createTextOutput(JSON.stringify({
@@ -167,10 +177,21 @@ function onEditHandler(e) {
   if (row <= headerRowIndex) return;
 
   var headers = sheet.getRange(headerRowIndex, 1, 1, sheet.getLastColumn()).getValues()[0];
-  var editedHeaderName = String(headers[editedCol - 1] || "").strip().toLowerCase();
+  var editedHeaderName = String(headers[editedCol - 1] || "").trim().toLowerCase();
 
   var isSheet2 = sheet.getName().toLowerCase().indexOf("запуск") !== -1;
   var isMainSheet = ["заявки", "запуски"].indexOf(sheet.getName().toLowerCase().trim()) !== -1;
+
+  // Финансовые колонки заполняются только ботом, партнёрам их менять нельзя.
+  var isFinancialColumn = editedHeaderName.indexOf("реф") !== -1 ||
+    editedHeaderName.indexOf("выплат") !== -1;
+  if (isFinancialColumn) {
+    e.range.setValue(e.oldValue !== undefined ? e.oldValue : "");
+    SpreadsheetApp.getActiveSpreadsheet().toast(
+      "⚠️ Реф и выплата заполняются автоматически", "Защита данных", 4
+    );
+    return;
+  }
 
   var isAllowedEdit = NOTIFY_COLUMNS.some(function (col) {
     return editedHeaderName.indexOf(col) !== -1;
@@ -191,17 +212,20 @@ function onEditHandler(e) {
   // только по колонкам, которые влияют на рабочий процесс.
   if (!isWatched && !isMainSheet) return;
 
-  var interviewId = null;
   var modelName = "";
+  var modelCode = "";
   var statusReason = "";
   var currentStatus = "";
 
   for (var i = 0; i < headers.length; i++) {
     var h = String(headers[i]).trim().toLowerCase();
     if ((h === "id" || h === "id заявки" || h === "№" || h === "№ заявки") && h.indexOf("агент") === -1 && h.indexOf("agent") === -1) {
-      interviewId = sheet.getRange(row, i + 1).getValue();
+      modelCode = normalizeModelCode(sheet.getRange(row, i + 1).getValue());
     }
-    if (h === "фио" || h === "фио модели" || h.indexOf("фио") !== -1 || (h.indexOf("модель") !== -1 && h.indexOf("телефон") === -1)) {
+    if (h.indexOf("id модели") !== -1 || h.indexOf("айди модели") !== -1 || h.indexOf("спец-номер") !== -1) {
+      modelCode = normalizeModelCode(sheet.getRange(row, i + 1).getValue());
+    }
+    if (h === "фио" || h === "фио модели" || h.indexOf("фио") !== -1 || (h.indexOf("модель") !== -1 && h.indexOf("телефон") === -1 && h.indexOf("id") === -1 && h.indexOf("айди") === -1 && h.indexOf("спец") === -1)) {
       modelName = String(sheet.getRange(row, i + 1).getValue()).trim();
     }
     if (h.indexOf("причин") !== -1 || h.indexOf("причина") !== -1) {
@@ -217,6 +241,39 @@ function onEditHandler(e) {
   var newValue = e.value || sheet.getRange(row, editedCol).getValue();
   var colTitle = String(headers[editedCol - 1] || "Статус").trim();
 
+  // Статусы можно заполнять только последовательно слева направо.
+  var statusColumns = [];
+  for (var statusIndex = 0; statusIndex < headers.length; statusIndex++) {
+    var statusHeader = String(headers[statusIndex] || "").trim().toLowerCase();
+    if (statusHeader.indexOf("статус") !== -1 || statusHeader.indexOf("собес") !== -1 ||
+      statusHeader.indexOf("принят") !== -1 || statusHeader.indexOf("регистрац") !== -1 ||
+      statusHeader.indexOf("подтвержд") !== -1 || statusHeader.indexOf("прод") !== -1 ||
+      statusHeader.indexOf("созвон") !== -1 || statusHeader.indexOf("смена") !== -1 ||
+      statusHeader.indexOf("слив") !== -1 || statusHeader.indexOf("отмен") !== -1) {
+      statusColumns.push(statusIndex + 1);
+    }
+  }
+  var editedStatusPosition = statusColumns.indexOf(editedCol);
+  if (editedStatusPosition !== -1 && !isSheet2) {
+    var firstEmptyStatusPosition = statusColumns.length;
+    for (var statusPosition = 0; statusPosition < statusColumns.length; statusPosition++) {
+      if (!String(sheet.getRange(row, statusColumns[statusPosition]).getValue()).trim()) {
+        firstEmptyStatusPosition = statusPosition;
+        break;
+      }
+    }
+
+    var isCurrentStatus = editedStatusPosition === firstEmptyStatusPosition;
+    var isPreviousStatus = editedStatusPosition === firstEmptyStatusPosition - 1;
+    if (!isCurrentStatus && !isPreviousStatus) {
+      e.range.setValue(e.oldValue !== undefined ? e.oldValue : "");
+      SpreadsheetApp.getActiveSpreadsheet().toast(
+        "⚠️ Можно менять только текущий и предыдущий статусы", "Последовательность статусов", 4
+      );
+      return;
+    }
+  }
+
   if (colTitle.toLowerCase().indexOf("причин") !== -1) {
     statusReason = String(newValue).trim();
     if (currentStatus) {
@@ -226,6 +283,25 @@ function onEditHandler(e) {
 
   var isReportColumn = editedHeaderName.indexOf("отчетник") !== -1;
   var userEmail = Session.getActiveUser().getEmail() || "";
+  var isModelNameEdit = isSheet2 && (editedHeaderName.indexOf("фио") !== -1 || editedHeaderName.indexOf("имя") !== -1);
+
+  if (isSheet2 && modelCode) {
+    var firstLaunchRow = findRowByModelCode(sheet, headerRowIndex, modelCode);
+    if (firstLaunchRow > headerRowIndex) {
+      removeDuplicateRowsByModelCode(sheet, headerRowIndex, modelCode, firstLaunchRow);
+    }
+  }
+
+  if (isModelNameEdit && modelCode) {
+    var reportUrlForRename = "";
+    for (var reportIndex = 0; reportIndex < headers.length; reportIndex++) {
+      if (String(headers[reportIndex]).trim().toLowerCase().indexOf("отчетник") !== -1) {
+        reportUrlForRename = extractUrlFromCell(sheet.getRange(row, reportIndex + 1));
+        break;
+      }
+    }
+    if (reportUrlForRename) updateReportModelName(reportUrlForRename, modelName);
+  }
 
   // 🔄 Если выставлен статус "Регистрация" — автоматически переносим модель на Лист 2 ("Запуски")
   if (String(newValue).trim().toLowerCase() === "регистрация") {
@@ -263,7 +339,7 @@ function onEditHandler(e) {
         var thName = String(targetHeaders[t]).trim().toLowerCase();
 
         if (thName === "id" || thName === "id заявки") {
-          newTargetRow[t] = interviewId || "";
+          newTargetRow[t] = modelCode || "";
         } else if (thName.indexOf("фио") !== -1) {
           newTargetRow[t] = modelName;
         } else if (thName === "отчетник") {
@@ -279,20 +355,29 @@ function onEditHandler(e) {
         }
       }
 
-      targetSheet.appendRow(newTargetRow);
+      var existingTargetRow = findRowByModelCode(targetSheet, targetHeaderRow, modelCode);
+      if (existingTargetRow > targetHeaderRow) {
+        for (var targetColumn = 0; targetColumn < newTargetRow.length; targetColumn++) {
+          if (newTargetRow[targetColumn] !== "") targetSheet.getRange(existingTargetRow, targetColumn + 1).setValue(newTargetRow[targetColumn]);
+        }
+        removeDuplicateRowsByModelCode(targetSheet, targetHeaderRow, modelCode, existingTargetRow);
+      } else {
+        targetSheet.appendRow(newTargetRow);
+      }
 
       // Отправляем вебхук в бот с URL отчётника
       if (reportUrl) {
-        sendReportUrlToBot(interviewId, modelName, reportUrl);
+        sendReportUrlToBot(modelCode, modelName, reportUrl);
       }
     } catch (errMove) {
       Logger.log("Ошибка копирования в Запуски: " + errMove.toString());
     }
   }
 
-  if (interviewId || modelName) {
+  if (modelCode || modelName) {
     var payload = {
-      interview_id: interviewId || "",
+      action: isModelNameEdit ? "model_name_changed" : "",
+      model_code: modelCode || "",
       model_name: modelName || "",
       new_status: colTitle + ": " + newValue,
       col_title: colTitle,
@@ -381,9 +466,9 @@ function fillModelHeaderInfo(sheet, modelName, modelTg) {
   } catch (e) { }
 }
 
-function sendReportUrlToBot(interviewId, modelName, reportUrl) {
+function sendReportUrlToBot(modelCode, modelName, reportUrl) {
   var payload = {
-    interview_id: interviewId || "",
+    model_code: modelCode || "",
     model_name: modelName || "",
     new_status: "Отчетник: " + reportUrl,
     is_report_column: true,
@@ -417,6 +502,82 @@ function findHeaderRow(sheet) {
     }
   }
   return 1;
+}
+
+function findRowByModelCode(sheet, headerRowIndex, modelCode) {
+  if (!modelCode) return -1;
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var headers = sheet.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
+  var idCol = -1;
+  for (var c = 0; c < headers.length; c++) {
+    var header = String(headers[c]).trim().toLowerCase();
+    if (header === "id" || header === "id заявки" || header === "№" || header === "№ заявки") {
+      idCol = c + 1;
+      break;
+    }
+  }
+  if (idCol === -1) return -1;
+  var targetId = String(modelCode).trim();
+  for (var row = headerRowIndex + 1; row <= sheet.getLastRow(); row++) {
+    if (String(sheet.getRange(row, idCol).getValue()).trim() === targetId) return row;
+  }
+  return -1;
+}
+
+function removeDuplicateRowsByModelCode(sheet, headerRowIndex, modelCode, keepRow) {
+  if (!modelCode) return;
+  var lastCol = Math.max(sheet.getLastColumn(), 1);
+  var headers = sheet.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
+  var idCol = -1;
+  for (var c = 0; c < headers.length; c++) {
+    var header = String(headers[c]).trim().toLowerCase();
+    if (header === "id" || header === "id заявки" || header === "№" || header === "№ заявки") {
+      idCol = c + 1;
+      break;
+    }
+  }
+  if (idCol === -1) return;
+  var targetId = String(modelCode).trim();
+  for (var row = sheet.getLastRow(); row > headerRowIndex; row--) {
+    if (row !== keepRow && String(sheet.getRange(row, idCol).getValue()).trim() === targetId) {
+      sheet.deleteRow(row);
+    }
+  }
+}
+
+function normalizeModelCode(value) {
+  var code = String(value == null ? "" : value).trim();
+  return code.replace(/\.0$/, "");
+}
+
+function extractUrlFromCell(cell) {
+  var formula = cell.getFormula();
+  var formulaMatch = formula && formula.match(/HYPERLINK\("([^"]+)"/i);
+  if (formulaMatch) return formulaMatch[1];
+  var value = String(cell.getValue() || "");
+  var valueMatch = value.match(/https?:\/\/docs\.google\.com\/spreadsheets\/d\/[\w-]+/i);
+  return valueMatch ? valueMatch[0] : "";
+}
+
+function updateReportModelName(reportUrl, modelName) {
+  try {
+    var reportSs = SpreadsheetApp.openByUrl(reportUrl);
+    var sheet = reportSs.getSheets()[0];
+    var maxR = Math.min(sheet.getLastRow(), 10);
+    var maxC = Math.min(sheet.getLastColumn(), 15);
+    var vals = sheet.getRange(1, 1, maxR, maxC).getValues();
+
+    for (var r = 0; r < vals.length; r++) {
+      for (var c = 0; c < vals[r].length; c++) {
+        var v = String(vals[r][c]).trim().toLowerCase();
+        if (v === "фио") {
+          sheet.getRange(r + 2, c + 1).setValue(modelName);
+        }
+      }
+    }
+  } catch (err) {
+    Logger.log("Не удалось обновить ФИО в отчётнике: " + err.toString());
+  }
 }
 
 function extractTgUsername(formText) {

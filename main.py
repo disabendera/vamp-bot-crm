@@ -25,7 +25,7 @@ async def main():
 
     # Запуск фонового трекера смен из отчётников моделей
     from services.shift_tracker import start_shift_tracker
-    asyncio.create_task(start_shift_tracker(bot, interval_seconds=180))
+    asyncio.create_task(start_shift_tracker(bot))
 
     # Запуск сервиса 6-часовых напоминаний и утреннего дайджеста
     from services.reminder_service import start_reminder_service

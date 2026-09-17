@@ -25,4 +25,4 @@ python main.py
 Первым нажмите /start сами — вы автоматически станете админом. Дальше назначайте наставников командой `/mentor tg_id` (человек должен сначала нажать /start).
 
 ## База данных
-SQLite-файл `crm.db` создаётся автоматически. Таблицы: users, models, interviews, materials, settings.
+SQLite-файл `crm.db` создаётся автоматически. Основная сущность кандидата/модели хранится в `models`; статусы собеседования и работы идут по этой же записи. Основные таблицы: users, models, materials, teams, partners, processed_shifts, sheet_history, settings.

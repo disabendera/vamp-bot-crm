@@ -705,19 +705,26 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
     header = (f"Позиция: {data.get('position', '-')}\n"
               f"Собес: {data.get('date', '-')} в {data.get('time', '-')} МСК")
     full_text = f"{header}\n\n{data['form']}{comment_block}"
-    
-    interview_id = await db.add_interview(
-        message.from_user.id,
-        full_text,
-        data.get("partner", ""),
-        data.get("position", ""),
-        data.get("date", ""),
-        data.get("time", ""),
+    answers = data.get("form_answers", [])
+    m_name = answers[0] if len(answers) > 0 else "Модель"
+    m_phone = answers[2] if len(answers) > 2 else ""
+    m_tg = answers[3] if len(answers) > 3 else ""
+
+    model_code = await db.add_model_application(
+        owner_tg_id=message.from_user.id,
+        name=m_name,
+        phone=m_phone,
+        username=m_tg,
+        text=full_text,
+        partner=data.get("partner", ""),
+        position=data.get("position", ""),
+        sobes_date=data.get("date", ""),
+        sobes_time=data.get("time", ""),
     )
     photos = data.get("photos", [])
     u_obj = await db.get_user(message.from_user.id)
     agent_code = db.get_agent_code(u_obj) or (1000 + message.from_user.id)
-    staff_msg = (f"✅ Заявка на собеседование №{interview_id} → {data.get('partner', '-')}\n"
+    staff_msg = (f"✅ Заявка на собеседование · ID модели {model_code} → {data.get('partner', '-')}\n"
                  f"От агента ID: {agent_code}\n\n{full_text}")
     
     for sid in await db.get_mentor_ids():
@@ -744,7 +751,7 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
                 partner_chat_id = str(p_dict["chat_id"]).strip()
                 topic_app = p_dict.get("topic_applications")
                 partner_msg = (
-                    f"📋 <b>Новая заявка на собеседование №{interview_id}</b>\n"
+                    f"📋 <b>Новая заявка на собеседование · ID модели {model_code}</b>\n"
                     f"👤 <b>Агент ID:</b> <code>{agent_code}</code>\n"
                     f"📅 <b>Дата и время:</b> {data.get('date', '-')} в {data.get('time', '-')} МСК\n\n"
                     f"<b>Анкета:</b>\n{data['form']}"
@@ -769,12 +776,8 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
 
             # 2. Отправка в Google Таблицу партнёра (если указан sheet_url)
             if partner_obj["sheet_url"]:
-                answers = data.get("form_answers", [])
-                m_name = answers[0] if len(answers) > 0 else ""
-                m_phone = answers[2] if len(answers) > 2 else ""
-                m_tg = answers[3] if len(answers) > 3 else ""
                 sheet_payload = {
-                    "interview_id": interview_id,
+                    "model_code": model_code,
                     "created_at": str(date.today()),
                     "agent_username": f"Агент ID: {agent_code}",
                     "agent_id": agent_code,
@@ -793,7 +796,7 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
                 asyncio.create_task(send_interview_to_sheet(partner_obj["sheet_url"], sheet_payload))
 
     user = await db.get_user(message.from_user.id)
-    await message.answer(f"✅ Запись выполнена (Заявка №{interview_id})", reply_markup=menu_for(user["role"]))
+    await message.answer(f"✅ Запись выполнена (ID модели: {model_code})", reply_markup=menu_for(user["role"]))
 
 
 
@@ -913,7 +916,7 @@ def render_models_page(models, status: str, page: int) -> str:
         username = f"@{m['username'].lstrip('@')}" if m["username"] else "-"
         lines.append(
             f"<b>{i}. {m['name']}</b>\n"
-            f"🆔 ID модели: <code>{m['id']}</code>\n"
+            f"🆔 ID модели: <code>{m['model_code']}</code>\n"
             f"📞 {phone}   🟢 {username}\n"
             f"⏱ Смен: <b>{m['shifts']}</b>"
         )
@@ -1012,7 +1015,7 @@ async def model_card(message: Message):
     if not m:
         return await message.answer("Модель не найдена среди ваших")
     await message.answer(render_model_card(m), parse_mode="HTML",
-                         reply_markup=kb.model_card_kb(m["id"], m["status"]))
+                         reply_markup=kb.model_card_kb(m["model_code"], m["status"]))
 
 
 def render_model_card(m) -> str:
@@ -1036,7 +1039,7 @@ async def model_shift(call: CallbackQuery):
     m = await db.get_model_by_id(int(model_id), call.from_user.id)
     if m:
         await call.message.edit_text(render_model_card(m), parse_mode="HTML",
-                                     reply_markup=kb.model_card_kb(m["id"], m["status"]))
+                                     reply_markup=kb.model_card_kb(m["model_code"], m["status"]))
     await call.answer("Смены обновлены ✅")
 
 
@@ -1047,47 +1050,19 @@ async def model_status(call: CallbackQuery):
     m = await db.get_model_by_id(int(model_id), call.from_user.id)
     if m:
         await call.message.edit_text(render_model_card(m), parse_mode="HTML",
-                                     reply_markup=kb.model_card_kb(m["id"], m["status"]))
-def extract_candidate_info_from_text(text: str):
-    source = text or ""
-
-    def field_value(pattern: str) -> str:
-        match = re.search(pattern, source, flags=re.IGNORECASE | re.MULTILINE)
-        return match.group(1).strip() if match else ""
-
-    # Ищем именно подписанные поля анкеты. В комментариях модели тоже есть пункты 1/3/4,
-    # поэтому нельзя определять поля только по номеру строки.
-    name = field_value(r"^1\)\s*(?:имя|фио)\s*:\s*(.+)$") or "Модель"
-    phone_raw = field_value(r"^3\)\s*(?:номер|телефон)\s*:\s*(.+)$")
-    username_raw = field_value(r"^4\)\s*(?:телеграм|tg)\s*:\s*(.+)$")
-
-    phone_match = re.search(r"(\+?\d[\d\s\-()]{7,}\d)", phone_raw)
-    phone = phone_match.group(1).strip() if phone_match else phone_raw
-
-    username_match = re.search(r"@[A-Za-z0-9_]{3,}", username_raw)
-    if username_match:
-        username = username_match.group(0).lstrip("@")
-    else:
-        username = username_raw.replace("https://t.me/", "").replace("t.me/", "").lstrip("@")
-
-    return name, phone, username
-
-
+                                     reply_markup=kb.model_card_kb(m["model_code"], m["status"]))
 @router.callback_query(F.data.startswith("agent_confirm:"))
 async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
-    interview_id = int(call.data.split(":")[1])
-    interview = await db.get_interview(interview_id)
-    if not interview:
-        return await call.answer("Заявка не найдена", show_alert=True)
+    model_code = call.data.split(":")[1]
+    model = await db.get_model_by_code(model_code)
+    if not model:
+        return await call.answer("Модель не найдена", show_alert=True)
     
-    await db.update_interview_app_status(interview_id, "Подтверждена агентом")
+    model = await db.update_model_app_status(model_code, "Подтверждена агентом")
     
-    name, phone, username = extract_candidate_info_from_text(interview["text"])
-    await db.add_model(
-        call.from_user.id, name, phone, username, interview_id=interview_id
-    )
+    name = model["name"] or "Модель"
     
-    partner_name = interview["partner"]
+    partner_name = model["partner"]
     if partner_name and partner_name != "-":
         partner_obj = await db.get_partner_by_name(partner_name)
         if partner_obj:
@@ -1095,7 +1070,7 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
             if p_dict.get("sheet_url"):
                 update_payload = {
                     "action": "update_agent_confirmation",
-                    "interview_id": interview_id,
+                    "model_code": model_code,
                     "model_name": name,
                     "status": "✅ Подтверждено",
                 }
@@ -1104,8 +1079,8 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
             # Отправка анкеты в Топик 2 (Подтверждения)
             if p_dict.get("chat_id"):
                 topic_conf = p_dict.get("topic_confirmations")
-                conf_header = f"✅ <b>ЗАЯВКА №{interview_id} · ПОДТВЕРЖДЕНА АГЕНТОМ</b>"
-                conf_msg = await db.format_anketa_topic_message(interview, conf_header)
+                conf_header = f"✅ <b>ID МОДЕЛИ {model_code} · ПОДТВЕРЖДЕНА АГЕНТОМ</b>"
+                conf_msg = await db.format_anketa_topic_message(model, conf_header)
                 try:
                     kwargs = {"message_thread_id": topic_conf} if topic_conf else {}
                     await bot.send_message(p_dict["chat_id"], conf_msg, parse_mode="HTML", **kwargs)
@@ -1113,9 +1088,9 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
                     print(f"Ошибка отправки подтверждения в топик: {e}")
             
     await call.message.edit_text(
-        f"✅ <b>ЗАЯВКА №{interview_id} ПОДТВЕРЖДЕНА</b>\n"
+        f"✅ <b>МОДЕЛЬ {model_code} ПОДТВЕРЖДЕНА</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💚 Модель <b>{name}</b> добавлена в раздел «💵 Мои модели»",
+        f"💚 <b>{name}</b> отмечена как подтверждённая агентом",
         parse_mode="HTML"
     )
     await call.answer("✅ Подтверждено!")
@@ -1123,22 +1098,22 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
 
 @router.callback_query(F.data.startswith("agent_reject:"))
 async def agent_reject_interview(call: CallbackQuery, bot: Bot):
-    interview_id = int(call.data.split(":")[1])
-    interview = await db.get_interview(interview_id)
-    if not interview:
-        return await call.answer("Заявка не найдена", show_alert=True)
+    model_code = call.data.split(":")[1]
+    model = await db.get_model_by_code(model_code)
+    if not model:
+        return await call.answer("Модель не найдена", show_alert=True)
         
-    await db.update_interview_app_status(interview_id, "Отклонена агентом")
+    model = await db.update_model_app_status(model_code, "Отклонена агентом")
     
-    partner_name = interview.get("partner")
+    partner_name = model["partner"]
     if partner_name and partner_name != "-":
         partner_obj = await db.get_partner_by_name(partner_name)
         if partner_obj:
             p_dict = dict(partner_obj)
             if p_dict.get("chat_id"):
                 topic_canc = p_dict.get("topic_cancelled")
-                canc_header = f"❌ <b>Заявка №{interview_id} — Слив / Отклонена агентом</b>"
-                canc_msg = await db.format_anketa_topic_message(interview, canc_header)
+                canc_header = f"❌ <b>ID МОДЕЛИ {model_code} · Слив / Отклонена агентом</b>"
+                canc_msg = await db.format_anketa_topic_message(model, canc_header)
                 try:
                     kwargs = {"message_thread_id": topic_canc} if topic_canc else {}
                     await bot.send_message(p_dict["chat_id"], canc_msg, parse_mode="HTML", **kwargs)
@@ -1146,7 +1121,7 @@ async def agent_reject_interview(call: CallbackQuery, bot: Bot):
                     print(f"Ошибка отправки слива в топик: {e}")
 
     await call.message.edit_text(
-        f"🔴 <b>ЗАЯВКА №{interview_id} · МОДЕЛЬ НЕ ПРИДЁТ</b>",
+        f"🔴 <b>ID МОДЕЛИ {model_code} · МОДЕЛЬ НЕ ПРИДЁТ</b>",
         parse_mode="HTML"
     )
     await call.answer("Отклонено")
