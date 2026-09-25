@@ -1,3 +1,5 @@
+from html import escape
+
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -17,7 +19,7 @@ class SearchForm(StatesGroup):
 
 async def can_search(tg_id: int) -> bool:
     user = await db.get_user(tg_id)
-    return bool(user and user["role"] not in ("pending", "banned"))
+    return bool(user and user["role"] in ("leader", "mentor", "admin"))
 
 
 async def can_view_models(tg_id: int) -> bool:
@@ -43,10 +45,13 @@ async def render_agent_card(agent, with_model_buttons: bool = True):
     text = (
         f"🔍 <b>АНКЕТА АГЕНТА</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👤 <b>{agent['full_name'] or '-'}</b>\n"
+        f"👤 <b>{escape(agent['full_name'] or '-')}</b> (@{escape(agent['username'] or '-')})\n"
         f"🔢 Агент ID: <code>{agent_code}</code>\n"
+        f"🟩 Telegram ID: <code>{agent['tg_id']}</code>\n"
         f"🎭 Роль: {role_name.get(agent['role'], agent['role'])}\n"
-        f"🧭 Путь: {path}\n"
+        f"🧭 Путь: {escape(path)}\n"
+        f"💳 Кошелек: <code>{escape(agent['wallet'] or '-')}</code>\n"
+        f"💵 Баланс: <b>${(agent['balance'] or 0):.2f}</b>\n"
         f"━━━━━━━━━━━━━━━\n"
         f"✅ Активные модели - <b>{active_cnt}</b>\n"
         f"🚫 Слив - <b>{dropped_cnt}</b>\n"
@@ -86,6 +91,9 @@ async def search_start(message: Message, state: FSMContext):
 
 @router.message(SearchForm.query)
 async def search_run(message: Message, state: FSMContext):
+    if not await can_search(message.from_user.id):
+        await state.clear()
+        return await message.answer("Нет прав")
     agent = await db.find_agent(message.text or "")
     if not agent:
         return await message.answer(
@@ -108,9 +116,9 @@ async def agent_models(call: CallbackQuery):
         await call.message.answer(f"{STATUS_TITLES[status]}: список пуст")
     else:
         lines = [
-            f"{i}. <b>{m['name']}</b>"
-            f"{' ' + m['phone'] if m['phone'] else ''}"
-            f"{' @' + m['username'] if m['username'] else ''}"
+            f"{i}. <b>{escape(m['name'])}</b>"
+            f"{' ' + escape(m['phone']) if m['phone'] else ''}"
+            f"{' @' + escape(m['username']) if m['username'] else ''}"
             f" - {m['shifts']} смен(-ы)"
             for i, m in enumerate(models, 1)
         ]
@@ -241,6 +249,9 @@ def position_pick_kb() -> InlineKeyboardMarkup:
 
 @router.callback_query(F.data.startswith("an:team:"))
 async def an_team_pick(call: CallbackQuery, state: FSMContext):
+    viewer = await db.get_user(call.from_user.id)
+    if not viewer or viewer["role"] not in ("mentor", "admin"):
+        return await call.answer("Нет прав", show_alert=True)
     team = await db.get_team(int(call.data.split(":")[2]))
     if not team:
         return await call.answer("Команда не найдена", show_alert=True)
@@ -384,6 +395,12 @@ STATUS_EMOJI = {
     "Назначено": "📌",
     "Слив": "🚫",
     "Активна": "✅",
+    "Принято": "🟢",
+    "Не принято": "🔴",
+    "Подтверждена агентом": "✅",
+    "Отклонена агентом": "🚫",
+    "Пришла на собеседование": "💚",
+    "Не пришла": "❌",
 }
 
 
@@ -397,6 +414,24 @@ def _bar(count: int, total: int) -> str:
 
 async def _an_render(call: CallbackQuery, state: FSMContext, selected: set[int] | None):
     data = await state.get_data()
+    # Роль и команда могли измениться, пока пользователь выбирал фильтры.
+    viewer = await db.get_user(call.from_user.id)
+    scope, scope_id = data.get("scope"), data.get("scope_id")
+    allowed = False
+    if viewer and viewer["role"] in ("agent", "leader", "mentor", "admin"):
+        if scope == "agent":
+            allowed = scope_id == viewer["tg_id"]
+        elif scope == "network":
+            allowed = viewer["role"] == "admin"
+        elif scope == "team":
+            if viewer["role"] in ("mentor", "admin"):
+                allowed = True
+            elif viewer["role"] == "leader":
+                team = await db.get_team_by_leader(viewer["tg_id"])
+                allowed = bool(team and team["id"] == scope_id)
+    if not allowed:
+        await state.clear()
+        return await call.answer("Нет прав на эту аналитику", show_alert=True)
     position = data.get("position")
     pos_emoji = "💃" if position == "Модель" else "👨"
     pos_word = "Модели" if position == "Модель" else "Операторы"
@@ -412,7 +447,7 @@ async def _an_render(call: CallbackQuery, state: FSMContext, selected: set[int] 
     else:
         breakdown = await db.analytics_interviews(
             data["dfrom"], data["dto"], team_id=data["scope_id"], position=position)
-        title = f"АНАЛИТИКА · «{data['scope_name']}»"
+        title = f"АНАЛИТИКА · «{escape(data['scope_name'])}»"
 
     total = sum(breakdown.values())
 
@@ -427,9 +462,10 @@ async def _an_render(call: CallbackQuery, state: FSMContext, selected: set[int] 
     else:
         if selected is None:
             shown = [st for st in db.APP_STATUSES if st in breakdown]
+            shown += [st for st in breakdown if st not in db.APP_STATUSES]
             summary = f"\n\n📝 Всего заявок: <b>{total}</b>\n"
         else:
-            shown = [db.APP_STATUSES[i] for i in sorted(selected)]
+            shown = [db.APP_STATUSES[i] for i in sorted(selected) if 0 <= i < len(db.APP_STATUSES)]
             count = sum(breakdown.get(st, 0) for st in shown)
             summary = (f"\n\n🎯 По выбранным статусам: <b>{count}</b>\n"
                        f"📝 Всего за период: <b>{total}</b>\n")
@@ -437,7 +473,7 @@ async def _an_render(call: CallbackQuery, state: FSMContext, selected: set[int] 
         for st in shown:
             c = breakdown.get(st, 0)
             emoji = STATUS_EMOJI.get(st, "▪️")
-            lines.append(f"{emoji} {st} - <b>{c}</b>\n{_bar(c, total)}")
+            lines.append(f"{emoji} {escape(st)} - <b>{c}</b>\n{_bar(c, total)}")
         body = summary + "\n" + "\n\n".join(lines)
 
     await state.clear()
@@ -511,7 +547,7 @@ async def _render_top(call: CallbackQuery, kind: str, dfrom: str, dto: str, labe
             s1, s2 = shifts.get(r["tg_id"], (0, 0))
             agent_code = db.get_agent_code(r)
             items.append({
-                "name": f"{r['full_name'] or '-'} (ID: <code>{agent_code}</code>)",
+                "name": f"{escape(r['full_name'] or '-')} (ID: <code>{agent_code}</code>)",
                 "rec": r["records"], "reg": r["regs"] or 0,
                 "s1": s1 or 0, "s2": s2 or 0,
             })
@@ -524,7 +560,7 @@ async def _render_top(call: CallbackQuery, kind: str, dfrom: str, dto: str, labe
                 continue  # соло в топ команд не входят - у них свой топ
             s1, s2 = shifts.get(r["team_id"], (0, 0))
             items.append({
-                "name": r["team_name"],
+                "name": escape(r["team_name"]),
                 "rec": r["records"], "reg": r["regs"] or 0,
                 "s1": s1 or 0, "s2": s2 or 0,
             })
@@ -727,6 +763,9 @@ async def model_search_start(call: CallbackQuery, state: FSMContext):
 @router.message(MSearch.query)
 async def model_search_run(message: Message, state: FSMContext):
     viewer = await db.get_user(message.from_user.id)
+    if not viewer or viewer["role"] not in ("agent", "leader", "mentor", "admin"):
+        await state.clear()
+        return await message.answer("Нет доступа")
     # охват: агент - свои, лидер - команда, наставник/админ - все
     tg_scope, team_scope = None, None
     if viewer["role"] == "agent":
@@ -752,14 +791,14 @@ async def model_search_run(message: Message, state: FSMContext):
         await message.answer(
             f"💵 <b>МОДЕЛЬ #{m['model_code']}</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Имя: <b>{m['name']}</b>\n"
-            f"📞 Телефон: {m['phone'] or '-'}\n"
-            f"🟢 Telegram: {'@' + m['username'] if m['username'] else '-'}\n"
+            f"Имя: <b>{escape(m['name'])}</b>\n"
+            f"📞 Телефон: {escape(m['phone'] or '-')}\n"
+            f"🟢 Telegram: {'@' + escape(m['username']) if m['username'] else '-'}\n"
             f"Статус: <b>{status_titles.get(m['status'], m['status'])}</b>\n"
             f"Смен: <b>{m['shifts']}</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"Агент: {m['owner_name'] or '-'} (ID: {m.get('owner_no', '-')})\n"
-            f"Привязка: {binding}"
+            f"Агент: {escape(m['owner_name'] or '-')} (ID: {m['owner_no']})\n"
+            f"Привязка: {escape(binding)}"
             f"{own_hint}",
             parse_mode="HTML",
         )
@@ -769,6 +808,8 @@ async def model_search_run(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "teammodels")
 async def team_models_pick(call: CallbackQuery):
+    if not await can_view_models(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
     team = await db.get_team_by_leader(call.from_user.id)
     if not team:
         return await call.answer("У вас нет команды", show_alert=True)
@@ -784,6 +825,8 @@ async def team_models_pick(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("tmodels:"))
 async def team_models_list(call: CallbackQuery):
+    if not await can_view_models(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
     team = await db.get_team_by_leader(call.from_user.id)
     if not team:
         return await call.answer("У вас нет команды", show_alert=True)
@@ -794,15 +837,15 @@ async def team_models_list(call: CallbackQuery):
         await call.message.answer(f"👥 «{team['name']}» · {title}: список пуст")
         return await call.answer()
     lines = [
-        f"{i}. <b>{m['name']}</b>"
+        f"{i}. <b>{escape(m['name'])}</b>"
         f" · ID <code>{m['model_code']}</code>"
-        f"{' ' + m['phone'] if m['phone'] else ''}"
-        f"{' @' + m['username'] if m['username'] else ''}"
+        f"{' ' + escape(m['phone']) if m['phone'] else ''}"
+        f"{' @' + escape(m['username']) if m['username'] else ''}"
         f" - {m['shifts']} смен(-ы)\n"
-        f"   агент: {m['owner_name'] or '-'} (№{m['owner_no']})"
+        f"   агент: {escape(m['owner_name'] or '-')} (№{m['owner_no']})"
         for i, m in enumerate(models, 1)
     ]
-    text = (f"👥 <b>Модели команды «{team['name']}»</b> · {title}\n"
+    text = (f"👥 <b>Модели команды «{escape(team['name'])}»</b> · {title}\n"
             f"━━━━━━━━━━━━━━━\n" + "\n".join(lines))
     if len(text) > 4000:
         text = text[:3990] + "\n…"

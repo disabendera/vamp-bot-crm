@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from html import escape
 from datetime import datetime, timezone, timedelta
 from aiogram import Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -53,7 +54,7 @@ async def check_6h_confirm_reminders(bot: Bot):
             msg_text = (
                 f"🟢 <b>СОБЕСЕДОВАНИЕ · ID МОДЕЛИ {model_code} · ЧЕРЕЗ 6 ЧАСОВ</b>\n"
                 f"{SEP}\n"
-                + (f"💚 Модель: <b>{model_nm}</b>\n" if model_nm else "")
+                + (f"💚 Модель: <b>{escape(model_nm)}</b>\n" if model_nm else "")
                 + f"📗 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n"
                 f"{SEP}\n"
                 f"Свяжитесь с моделью и подтвердите, что она <b>придёт на собеседование</b> "
@@ -100,7 +101,7 @@ async def check_morning_digest(bot: Bot):
                     status = inv.get("app_status") or "Новая"
                     lines.append(
                         f"<b>{idx}. {s_time} МСК</b> · ID модели {inv['model_code']}\n"
-                        f"✅ Статус: {status}"
+                        f"✅ Статус: {escape(status)}"
                     )
 
                 full_msg = "\n".join(lines)

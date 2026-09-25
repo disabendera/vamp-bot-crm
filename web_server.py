@@ -1,4 +1,5 @@
 import logging
+from html import escape
 from aiohttp import web
 from aiogram import Bot
 
@@ -14,12 +15,13 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
     bot: Bot = request.app["bot"]
     try:
         data = await request.json()
-        logger.info(f"📥 Входящий вебхук от Google Таблицы: {data}")
     except Exception as e:
         logger.error(f" Ошибка парсинга JSON вебхука: {e}")
         return web.json_response({"error": "Invalid JSON"}, status=400)
 
 
+    if not isinstance(data, dict):
+        return web.json_response({"error": "Invalid JSON object"}, status=400)
     secret = data.get("secret") or request.headers.get("X-Webhook-Secret")
     if secret != WEBHOOK_SECRET:
         return web.json_response({"error": "Unauthorized"}, status=401)
@@ -100,6 +102,12 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
     partner_name = model_dict.get("partner") or "-"
     real_id = model_dict["model_code"]
 
+    # Партнёр управляет активностью модели через таблицу (включая старые кнопки бота).
+    normalized = db.normalize_status(new_status)
+    if "статус" in col_title or "статус" in status_lower or "запуск" in sheet_name:
+        if normalized in ("Слив", "Активна"):
+            await db.set_model_status(real_id, agent_tg_id, "dropped" if normalized == "Слив" else "active")
+
     # Кнопка подтверждения отправляется ТОЛЬКО при действительно принятом статусе.
     is_accepted = db.is_accepted_app_status(new_status)
 
@@ -108,10 +116,10 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
     msg_text = (
         f"🟢 <b>СТАТУС МОДЕЛИ {real_id}</b>\n"
         f"{SEP}\n"
-        f"✅ Новый статус: <b>{new_status}</b>"
+        f"✅ Новый статус: <b>{escape(str(new_status))}</b>"
     )
     if status_reason:
-        msg_text += f"\n✳️ Причина: {status_reason}"
+        msg_text += f"\n✳️ Причина: {escape(status_reason)}"
 
     try:
         if is_accepted:
@@ -132,7 +140,7 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
                 confirm_text = (
                     f"🟢 <b>ПАРТНЁР ПРИНЯЛ МОДЕЛЬ {real_id}</b>\n"
                     f"{SEP}\n"
-                    + (f"💚 Модель: <b>{model_nm}</b>\n" if model_nm else "")
+                    + (f"💚 Модель: <b>{escape(model_nm)}</b>\n" if model_nm else "")
                     + f"📗 Собеседование: <b>{sobes_date or '-'} в {sobes_time or '-'} МСК</b>\n"
                     f"{SEP}\n"
                     f"Свяжитесь с моделью и подтвердите, что она <b>придёт на собеседование</b> "
@@ -170,7 +178,7 @@ async def handle_sheet_status(request: web.Request) -> web.Response:
                         target_topic = p_dict.get("topic_cancelled")
                         topic_header = f"🔴 <b>ID МОДЕЛИ {real_id} · СЛИВ / ОТМЕНА</b>"
                         if status_reason:
-                            topic_header += f"\n✳️ Причина: {status_reason}"
+                            topic_header += f"\n✳️ Причина: {escape(status_reason)}"
 
                     if topic_header:
                         p_msg_text = await db.format_anketa_topic_message(model_dict, topic_header)

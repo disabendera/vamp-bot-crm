@@ -2,6 +2,7 @@ import asyncio
 import csv
 import io
 import logging
+from html import escape
 import os
 import re
 import threading
@@ -219,7 +220,7 @@ async def check_single_report_sheet(bot: Bot, session: aiohttp.ClientSession, mo
                 msg_text = (
                     f"💵 <b>НАЧИСЛЕНИЕ ЗА СМЕНУ</b>\n"
                     f"{SEP}\n"
-                    f"💚 Модель: <b>{model_name}</b>\n"
+                    f"💚 Модель: <b>{escape(model_name)}</b>\n"
                     f"{model_id_line}"
                     f"✅ Дата смены: <b>{shift_date}</b>\n"
                     f"🟢 Время работы: <b>{hours_display} ч</b>\n"
@@ -231,7 +232,7 @@ async def check_single_report_sheet(bot: Bot, session: aiohttp.ClientSession, mo
                 msg_text = (
                     f"✳️ <b>СМЕНА БЕЗ ВЫПЛАТЫ</b>\n"
                     f"{SEP}\n"
-                    f"💚 Модель: <b>{model_name}</b>\n"
+                    f"💚 Модель: <b>{escape(model_name)}</b>\n"
                     f"{model_id_line}"
                     f"✅ Дата смены: <b>{shift_date}</b>\n"
                     f"🟢 Время работы: <b>{hours_display} ч</b>\n"

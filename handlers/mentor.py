@@ -1,4 +1,8 @@
 import asyncio
+import logging
+import math
+from html import escape
+from uuid import uuid4
 from aiogram import Router, F, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -11,6 +15,8 @@ from aiogram.types import (
 import db
 import keyboards as kb
 from services.posts import serialize_post, send_post
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -66,7 +72,7 @@ async def approve(call: CallbackQuery, bot: Bot):
         from handlers.user import send_onb_step
         await send_onb_step(bot, tg_id, 1)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer("Принят ✅")
 
 
@@ -80,7 +86,7 @@ async def reject(call: CallbackQuery, bot: Bot):
     try:
         await bot.send_message(tg_id, "К сожалению, ваша заявка отклонена")
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer("Отклонён 🚫")
 
 
@@ -105,7 +111,7 @@ async def panel_pending(call: CallbackQuery):
         await call.message.answer(
             f"🟢 <b>ЗАЯВКА НА ВСТУПЛЕНИЕ</b>\n"
             f"━━━━━━━━━━━━━━━\n"
-            f"👤 Имя: <b>{u['full_name'] or '-'}</b>\n"
+            f"👤 Имя: <b>{escape(u['full_name'] or '-')}</b>\n"
             f"✅ Агент ID: <code>{agent_code}</code>\n"
             f"🟢 Юзернейм: @{u['username'] or '-'}\n"
             f"🟩 Telegram ID: <code>{u['tg_id']}</code>",
@@ -127,8 +133,8 @@ async def panel_interviews(call: CallbackQuery):
         agent_code = r["owner_agent_code"] or (1000 + r["owner_no"] if r["owner_no"] else r["owner_tg_id"])
         model_code = r["model_code"]
         await call.message.answer(
-            f"📝 ID модели {model_code} от Агента ID {agent_code}:\n\n{r['text']}\n\n"
-            f"🎛 Статус: <b>{app_status}</b>\n"
+            f"📝 ID модели {model_code} от Агента ID {agent_code}:\n\n{escape(r['text'])}\n\n"
+            f"🎛 Статус: <b>{escape(app_status)}</b>\n"
             f"Закрыть заявку: /close_{model_code}",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
@@ -206,7 +212,7 @@ async def panel_lesson_view(call: CallbackQuery):
     if not material:
         return await call.answer("Урок не найден", show_alert=True)
     await call.message.answer(
-        f"📗 <b>{material['title']}</b>\n━━━━━━━━━━━━━━━\n{material['content']}",
+        f"📗 <b>{escape(material['title'])}</b>\n━━━━━━━━━━━━━━━\n{material['content']}",
         parse_mode="HTML", disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="✏️ Изменить текст", callback_data=f"lessonedit:{material['id']}"),
@@ -335,7 +341,7 @@ async def del_material_ask(call: CallbackQuery):
     if not material:
         return await call.answer("Урок не найден", show_alert=True)
     await call.message.answer(
-        f"⚠️ <b>Удалить урок «{material['title']}»?</b>\n"
+        f"⚠️ <b>Удалить урок «{escape(material['title'])}»?</b>\n"
         f"Действие необратимо",
         parse_mode="HTML",
         reply_markup=confirm_delete_kb(f"cfdelmat:{material['id']}"),
@@ -425,10 +431,15 @@ async def add_balance_start(call: CallbackQuery, state: FSMContext):
 
 @router.message(MForms.balance)
 async def add_balance_save(message: Message, state: FSMContext, bot: Bot):
+    if not await is_staff(message.from_user.id):
+        await state.clear()
+        return await message.answer("Нет прав")
     await state.clear()
     try:
         tg_id_str, amount_str = message.text.split()
         tg_id, amount = int(tg_id_str), float(amount_str)
+        if not math.isfinite(amount):
+            raise ValueError
     except ValueError:
         return await message.answer("❌ Неверный формат. Нужно: tg_id сумма")
     if not await db.get_user(tg_id):
@@ -438,13 +449,17 @@ async def add_balance_save(message: Message, state: FSMContext, bot: Bot):
     try:
         await bot.send_message(tg_id, f"💰 Вам начислено: {amount}")
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
 
 
 # ---------- Раздел «Управление» (только админ) ----------
 
 class AForms(StatesGroup):
     shop_post = State()
+    adj_query = State()
+    adj_amount = State()
+    adj_reason = State()
+    adj_confirm = State()
     broadcast = State()
     partner_name = State()
     partner_chat_id = State()
@@ -636,7 +651,7 @@ async def adm_agent_partners_find(message: Message, state: FSMContext):
     assigned = await db.get_agent_partners(agent["tg_id"])
     assigned_text = ", ".join(p["name"] for p in assigned) or "нет"
     await message.answer(
-        f"🔗 <b>{agent['full_name'] or agent['tg_id']}</b> (ID: {db.get_agent_code(agent)})\n"
+        f"🔗 <b>{escape(agent['full_name'] or str(agent['tg_id']))}</b> (ID: {db.get_agent_code(agent)})\n"
         f"Назначены по порядку: <b>{assigned_text}</b>\n\n"
         "Нажимайте на партнёров, чтобы добавить или убрать. Порядок добавления используется в ротации.",
         parse_mode="HTML",
@@ -656,7 +671,7 @@ async def adm_agent_partner_toggle(call: CallbackQuery):
     assigned = await db.get_agent_partners(agent_tg_id)
     assigned_text = ", ".join(p["name"] for p in assigned) or "нет"
     await call.message.edit_text(
-        f"🔗 <b>{agent['full_name'] or agent_tg_id}</b> (ID: {db.get_agent_code(agent)})\n"
+        f"🔗 <b>{escape(agent['full_name'] or str(agent_tg_id))}</b> (ID: {db.get_agent_code(agent)})\n"
         f"Назначены по порядку: <b>{assigned_text}</b>\n\n"
         "Нажимайте на партнёров, чтобы добавить или убрать. Порядок добавления используется в ротации.",
         parse_mode="HTML",
@@ -761,7 +776,7 @@ async def adm_partners(call: CallbackQuery):
             canc_t = pt_dict.get("topic_cancelled") or "❌"
 
             text = (
-                f"🤝 <b>Партнёр: {pt['name']}</b> (ID: {pt['id']})\n"
+                f"🤝 <b>Партнёр: {escape(pt['name'])}</b> (ID: {pt['id']})\n"
                 f"💬 Chat ID: {chat_str}\n"
                 f"📊 Webhook Таблицы: {sheet_str}\n\n"
                 f"📌 <b>Топики этапов:</b>\n"
@@ -929,7 +944,7 @@ async def adm_add_mentor_save(message: Message, state: FSMContext, bot: Bot):
     try:
         await bot.send_message(tg_id, "🎓 Вам выдана роль наставника!", reply_markup=kb.mentor_menu)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
 
 
 @router.callback_query(F.data == "adm:demote")
@@ -964,7 +979,7 @@ async def adm_demote(call: CallbackQuery, bot: Bot):
     try:
         await bot.send_message(tg_id, "Ваша роль изменена: вы снова агент", reply_markup=kb.main_menu)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer()
 
 
@@ -991,7 +1006,7 @@ async def adm_add_leader_find(message: Message, state: FSMContext):
     await state.update_data(leader_tg_id=agent["tg_id"], leader_name=f"{agent['full_name']} (ID: {agent_code})")
     await state.set_state(AForms.leader_team_name)
     await message.answer(
-        f"Лидер: <b>{agent['full_name']}</b> (ID: {agent_code})\n\n"
+        f"Лидер: <b>{escape(agent['full_name'] or '-')}</b> (ID: {agent_code})\n\n"
         f"Теперь введите название команды:",
         parse_mode="HTML",
         reply_markup=kb.cancel_kb,
@@ -1016,7 +1031,7 @@ async def adm_add_leader_save(message: Message, state: FSMContext, bot: Bot):
             reply_markup=kb.leader_menu,
         )
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
 
 
 @router.callback_query(F.data == "adm:agent_path")
@@ -1046,8 +1061,9 @@ async def adm_agent_path_find(message: Message, state: FSMContext):
     team = await db.get_team(agent["team_id"]) if agent["team_id"] else None
     current_path = f"команда «{team['name']}»" if team else "соло"
     await message.answer(
-        f"🧭 Агент: <b>{agent['full_name'] or agent['tg_id']}</b> (№{agent['id']})\n"
-        f"Сейчас: {current_path}\n\n"
+        f"🧭 Агент: <b>{escape(agent['full_name'] or str(agent['tg_id']))}</b> (@{escape(agent['username'] or '-')})\n"
+        f"🔢 Агент ID: <code>{db.get_agent_code(agent)}</code> · 🟩 Telegram ID: <code>{agent['tg_id']}</code>\n"
+        f"Сейчас: {escape(current_path)}\n\n"
         f"Выберите путь:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
@@ -1072,7 +1088,7 @@ async def adm_agent_path_set(call: CallbackQuery, bot: Bot):
     try:
         await bot.send_message(tg_id, note)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer()
 
 
@@ -1107,7 +1123,7 @@ async def adm_team_view(call: CallbackQuery):
     models = await db.team_models(team["id"])
 
     agent_lines = [
-        f"{i}. Агент ID {a.get('agent_code') or (1000 + a['id'])} {a['full_name'] or '-'}"
+        f"{i}. Агент ID {a.get('agent_code') or (1000 + a['id'])} {escape(a['full_name'] or '-')}"
         f"{' 👑' if a['tg_id'] == team['leader_tg_id'] else ''}"
         for i, a in enumerate(agents, 1)
     ] or ["- пусто -"]
@@ -1115,14 +1131,14 @@ async def adm_team_view(call: CallbackQuery):
     active = [m for m in models if m["status"] == "active"]
     dropped = [m for m in models if m["status"] == "dropped"]
     model_lines = [
-        f"{i}. <b>{m['name']}</b> - {m['shifts']} смен(-ы) (агент ID {m['owner_no']})"
+        f"{i}. <b>{escape(m['name'])}</b> - {m['shifts']} смен(-ы) (агент ID {m['owner_no']})"
         for i, m in enumerate(active, 1)
     ] or ["- пусто -"]
 
     text = (
-        f"👥 <b>КОМАНДА «{team['name'].upper()}»</b>\n"
+        f"👥 <b>КОМАНДА «{escape(team['name'].upper())}»</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"👑 Лидер: <b>{leader['full_name'] if leader else '-'}</b> "
+        f"👑 Лидер: <b>{escape((leader['full_name'] or '-') if leader else '-')}</b> "
         f"(ID: {leader.get('agent_code') if leader else '-'})\n"
         f"━━━━━━━━━━━━━━━\n"
         f"🧑 <b>Агенты - {len(agents)}</b>\n" + "\n".join(agent_lines) +
@@ -1208,7 +1224,8 @@ async def adm_roles_find(message: Message, state: FSMContext):
     current = ROLE_TITLES.get(agent["role"], agent["role"])
     agent_code = db.get_agent_code(agent)
     await message.answer(
-        f"🎭 <b>{agent['full_name']}</b> (ID: {agent_code})\n"
+        f"🎭 <b>{escape(agent['full_name'] or '-')}</b> (@{escape(agent['username'] or '-')})\n"
+        f"🔢 Агент ID: <code>{agent_code}</code> · 🟩 Telegram ID: <code>{agent['tg_id']}</code>\n"
         f"Текущая роль: <b>{current}</b>\n\n"
         f"Выберите новую роль (текущую роль можно забрать, выдав «Агент»):",
         parse_mode="HTML",
@@ -1243,7 +1260,7 @@ async def adm_set_role(call: CallbackQuery, state: FSMContext, bot: Bot):
         await bot.send_message(tg_id, f"🎭 Ваша роль изменена: {title}",
                                reply_markup=getattr(kb, ROLE_MENUS[role]))
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer("Готово ✅")
 
 
@@ -1263,7 +1280,7 @@ async def adm_set_role_leader(message: Message, state: FSMContext, bot: Bot):
                                f"👑 Вы назначены лидером команды «{team_name}»!",
                                reply_markup=kb.leader_menu)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
 
 
 # ---------- Блокировка агента (только админ) ----------
@@ -1298,7 +1315,8 @@ async def adm_block_find(message: Message, state: FSMContext):
         ]])
         status = "🟢 Активен"
     await message.answer(
-        f"🚷 <b>{agent['full_name'] or agent['tg_id']}</b> (№{agent['id']}, @{agent['username'] or '-'})\n"
+        f"🚷 <b>{escape(agent['full_name'] or str(agent['tg_id']))}</b> (@{escape(agent['username'] or '-')})\n"
+        f"🔢 Агент ID: <code>{db.get_agent_code(agent)}</code> · 🟩 Telegram ID: <code>{agent['tg_id']}</code>\n"
         f"Статус: <b>{status}</b>",
         parse_mode="HTML",
         reply_markup=markup,
@@ -1316,7 +1334,7 @@ async def adm_block_ask(call: CallbackQuery):
     if not agent:
         return await call.answer("Пользователь не найден", show_alert=True)
     await call.message.answer(
-        f"⚠️ <b>Заблокировать {agent['full_name'] or tg_id}?</b>\n\n"
+        f"⚠️ <b>Заблокировать {escape(agent['full_name'] or str(tg_id))}?</b>\n\n"
         f"Он полностью потеряет доступ к боту: меню, заявки, модели, аналитика\n"
         f"Разблокировать можно в любой момент здесь же",
         parse_mode="HTML",
@@ -1337,7 +1355,7 @@ async def adm_block_confirm(call: CallbackQuery, bot: Bot):
     try:
         await bot.send_message(tg_id, "⛔ Ваш доступ к боту заблокирован администратором")
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer("Заблокирован ⛔")
 
 
@@ -1352,7 +1370,7 @@ async def adm_unblock(call: CallbackQuery, bot: Bot):
         await bot.send_message(tg_id, "✅ Ваш доступ восстановлен! Нажмите /start",
                                reply_markup=kb.main_menu)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     await call.answer("Разблокирован ✅")
 
 
@@ -1429,7 +1447,7 @@ async def adm_tops_render(call: CallbackQuery):
         for i, r in enumerate(rows, 1):
             s1, s2 = shifts.get(r["tg_id"], (0, 0))
             lines.append(
-                f"<b>{i}. {r['full_name'] or '-'}</b> "
+                f"<b>{i}. {escape(r['full_name'] or '-')}</b> "
                 f"(№{r['agent_no']}, @{r['username'] or '-'}, ID: <code>{r['tg_id']}</code>)\n"
                 f"{_funnel_line(r['records'], r['regs'] or 0, s1 or 0, s2 or 0)}"
             )
@@ -1441,7 +1459,7 @@ async def adm_tops_render(call: CallbackQuery):
         for i, r in enumerate(rows, 1):
             s1, s2 = shifts.get(r["team_id"], (0, 0))
             lines.append(
-                f"<b>{i}. {r['team_name']}</b>\n"
+                f"<b>{i}. {escape(r['team_name'])}</b>\n"
                 f"{_funnel_line(r['records'], r['regs'] or 0, s1 or 0, s2 or 0)}"
             )
 
@@ -1561,6 +1579,131 @@ async def adm_broadcast_send(call: CallbackQuery, state: FSMContext, bot: Bot):
     await call.answer()
 
 
+# ---------- Корректировка баланса (только админ, с подтверждением) ----------
+
+@router.callback_query(F.data == "adm:adjust")
+async def adm_adjust_start(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    await state.clear()
+    await state.set_state(AForms.adj_query)
+    await call.message.answer("💵 Отправьте агентский ID, Telegram ID или @юзернейм агента:",
+                              reply_markup=kb.cancel_kb)
+    await call.answer()
+
+
+@router.message(AForms.adj_query)
+async def adm_adjust_find(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return await message.answer("Нет прав")
+    agent = await db.find_agent(message.text or "")
+    if not agent:
+        return await message.answer("❌ Агент не найден. Попробуйте ещё раз", reply_markup=kb.cancel_kb)
+    await state.update_data(adj_tg_id=agent["tg_id"],
+                            adj_name=agent["full_name"] or str(agent["tg_id"]))
+    await state.set_state(AForms.adj_amount)
+    await message.answer(
+        f"👤 <b>{escape(agent['full_name'] or '-')}</b> (@{escape(agent['username'] or '-')})\n"
+        f"💵 Текущий баланс: <b>${(agent['balance'] or 0):.2f}</b>\n\n"
+        "Введите сумму корректировки: например <code>12</code> (добавить) или <code>-12</code> (снять)",
+        parse_mode="HTML", reply_markup=kb.cancel_kb,
+    )
+
+
+@router.message(AForms.adj_amount)
+async def adm_adjust_amount(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return await message.answer("Нет прав")
+    try:
+        amount = float((message.text or "").replace(",", ".").replace("$", "").strip())
+        if not math.isfinite(amount) or amount == 0:
+            raise ValueError
+    except ValueError:
+        return await message.answer("❌ Нужно ненулевое число, например 12 или -12", reply_markup=kb.cancel_kb)
+    await state.update_data(adj_amount=amount)
+    await state.set_state(AForms.adj_reason)
+    await message.answer("Укажите причину корректировки (сохранится в истории):", reply_markup=kb.cancel_kb)
+
+
+@router.message(AForms.adj_reason)
+async def adm_adjust_reason(message: Message, state: FSMContext):
+    if not await is_admin(message.from_user.id):
+        await state.clear()
+        return await message.answer("Нет прав")
+    reason = (message.text or "").strip()
+    if not reason:
+        return await message.answer("Укажите причину текстом", reply_markup=kb.cancel_kb)
+    request_id = uuid4().hex
+    await state.update_data(adj_reason=reason, adj_request_id=request_id)
+    await state.set_state(AForms.adj_confirm)
+    data = await state.get_data()
+    await message.answer(
+        f"⚠️ <b>Подтвердите корректировку</b>\n━━━━━━━━━━━━━━━\n"
+        f"👤 {escape(data['adj_name'])}\n"
+        f"💵 Сумма: <b>{data['adj_amount']:+.2f}$</b>\n"
+        f"✳️ Причина: {escape(reason)}",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, применить", callback_data=f"adj_apply:{request_id}")],
+            [InlineKeyboardButton(text="🔴 Отмена", callback_data=f"adj_cancel:{request_id}")],
+        ]),
+    )
+
+
+@router.callback_query(F.data.startswith("adj_cancel:"))
+async def adm_adjust_cancel(call: CallbackQuery, state: FSMContext):
+    if not await is_admin(call.from_user.id):
+        return await call.answer("Нет прав", show_alert=True)
+    data = await state.get_data()
+    if call.data.split(":", 1)[1] != data.get("adj_request_id"):
+        return await call.answer("Эта корректировка уже закрыта", show_alert=True)
+    await state.clear()
+    await call.message.edit_text("🔴 Корректировка отменена")
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith("adj_apply:"))
+async def adm_adjust_apply(call: CallbackQuery, state: FSMContext, bot: Bot):
+    if not await is_admin(call.from_user.id):
+        await state.clear()
+        return await call.answer("Нет прав", show_alert=True)
+    data = await state.get_data()
+    request_id = call.data.split(":", 1)[1]
+    if (await state.get_state() != AForms.adj_confirm.state
+            or request_id != data.get("adj_request_id")):
+        return await call.answer("Данные устарели, начните заново", show_alert=True)
+    try:
+        changed = await db.adjust_balance(data["adj_tg_id"], data["adj_amount"], data["adj_reason"],
+                                          call.from_user.id, request_id)
+    except (ValueError, PermissionError) as exc:
+        await state.clear()
+        return await call.answer(str(exc), show_alert=True)
+    await state.clear()
+    if not changed:
+        return await call.answer("Корректировка уже выполнена", show_alert=True)
+    agent = await db.get_user(data["adj_tg_id"])
+    await call.message.edit_text(
+        f"✅ <b>БАЛАНС СКОРРЕКТИРОВАН</b>\n━━━━━━━━━━━━━━━\n"
+        f"👤 {escape(data['adj_name'])}\n"
+        f"💵 {data['adj_amount']:+.2f}$ → новый баланс <b>${(agent['balance'] or 0):.2f}</b>",
+        parse_mode="HTML",
+    )
+    try:
+        await bot.send_message(
+            data["adj_tg_id"],
+            f"💵 <b>КОРРЕКТИРОВКА БАЛАНСА</b>\n━━━━━━━━━━━━━━━\n"
+            f"Сумма: <b>{data['adj_amount']:+.2f}$</b>\n"
+            f"Причина: {escape(data['adj_reason'])}\n"
+            f"💳 Ваш баланс: <b>${(agent['balance'] or 0):.2f}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.warning("Не удалось отправить уведомление о корректировке баланса", exc_info=True)
+    await call.answer("Готово ✅")
+
+
 # ---------- Партнёры: команды-дубли (только админ) ----------
 
 @router.message(Command("addpartner"))
@@ -1599,7 +1742,7 @@ async def delete_partner_ask(call: CallbackQuery):
     if not partner:
         return await call.answer("Партнёр не найден", show_alert=True)
     await call.message.answer(
-        f"⚠️ <b>Удалить партнёра «{partner['name']}»?</b>\n"
+        f"⚠️ <b>Удалить партнёра «{escape(partner['name'])}»?</b>\n"
         f"Действие необратимо",
         parse_mode="HTML",
         reply_markup=confirm_delete_kb(f"cfdelpart:{partner['id']}"),
@@ -1634,7 +1777,7 @@ async def make_mentor(message: Message, bot: Bot):
     try:
         await bot.send_message(tg_id, "🎓 Вам выдана роль наставника!", reply_markup=kb.mentor_menu)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
 
 
 @router.message(Command("demote"))

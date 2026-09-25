@@ -19,6 +19,82 @@ var NOTIFY_COLUMNS = [
 
 var lastCreateError = "";
 
+function isInterviewScheduleHeader(header) {
+  return /^дата и время собес(едования|а)$/.test(String(header || "").trim().toLowerCase());
+}
+
+function formatInterviewSchedule(data) {
+  var date = String(data.date || "").trim();
+  var time = String(data.time || "").trim();
+  return [date, time ? time + " МСК" : ""].filter(function (part) { return part; }).join(" ");
+}
+
+function ensureInterviewScheduleColumn(sheet) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var headerRow = findHeaderRow(sheet);
+    var headers = sheet.getRange(headerRow, 1, 1, Math.max(sheet.getLastColumn(), 1)).getValues()[0];
+    var idColumn = -1, scheduleColumn = -1;
+    for (var i = 0; i < headers.length; i++) {
+      var header = String(headers[i] || "").trim().toLowerCase();
+      if (["id", "id заявки", "№", "№ заявки"].indexOf(header) !== -1) idColumn = i + 1;
+      if (isInterviewScheduleHeader(header)) scheduleColumn = i + 1;
+    }
+    if (idColumn === -1) throw new Error("В листе заявок не найден столбец ID");
+    if (scheduleColumn === -1) {
+      sheet.insertColumnAfter(idColumn);
+      scheduleColumn = idColumn + 1;
+      sheet.getRange(headerRow, scheduleColumn).setValue("Дата и время собеседования");
+      sheet.setColumnWidth(scheduleColumn, 220);
+    } else if (scheduleColumn !== idColumn + 1) {
+      sheet.moveColumns(sheet.getRange(headerRow, scheduleColumn), idColumn + 1);
+    }
+    SpreadsheetApp.flush();
+    return headerRow;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function setupApplicationsSheet() {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureInterviewScheduleColumn(ss.getSheetByName("Заявки") || ss.getSheets()[0]);
+}
+
+function applyPartnerAcceptanceValidation(sheet, row, column, headerRow) {
+  var target = sheet.getRange(row, column);
+  if (row > headerRow + 1) {
+    try {
+      var source = sheet.getRange(row - 1, column);
+      if (source.getDataValidation && source.getDataValidation()) {
+        source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
+        return;
+      }
+    } catch (eValidationCopy) { }
+  }
+
+  var acceptanceRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(["Принято", "Не принято"], true)
+    .setAllowInvalid(false)
+    .build();
+  target.setDataValidation(acceptanceRule);
+}
+
+function findPartnerAcceptanceColumn(headers) {
+  var statusColumn = -1;
+  for (var i = 0; i < headers.length; i++) {
+    var header = String(headers[i] || "").trim().toLowerCase().replace(/ё/g, "е");
+    if (header.indexOf("принят") !== -1 && header.indexOf("агент") === -1 &&
+      header.indexOf("причин") === -1 && header.indexOf("дата") === -1) {
+      return i + 1;
+    }
+    if (header === "статус заявки") return i + 1;
+    if (header === "статус" && statusColumn === -1) statusColumn = i + 1;
+  }
+  return statusColumn;
+}
+
 function doPost(e) {
   try {
     lastCreateError = "";
@@ -58,19 +134,13 @@ function doPost(e) {
             var isMatch = false;
             // 🎯 Единственный способ сопоставления — точный ID модели.
             if (targetId) {
-              if (rowId && (rowId === targetId || parseInt(rowId, 10) === parseInt(targetId, 10))) {
+              if (rowId && normalizeModelCode(rowId) === normalizeModelCode(targetId)) {
                 isMatch = true;
-              } else {
-                // Если ID лежал во 2-м столбце (B) вместо 1-го (A)
-                var colBVal = String(sh.getRange(r, 2).getValue()).trim();
-                if (colBVal && (colBVal === targetId || parseInt(colBVal, 10) === parseInt(targetId, 10))) {
-                  isMatch = true;
-                }
               }
             }
 
             // Для старых строк без ID модели используем точное совпадение ФИО.
-            if (!isMatch && modelNameCol !== -1 && data.model_name) {
+            if (!isMatch && !rowId && modelNameCol !== -1 && data.model_name) {
               var rowModelName = String(sh.getRange(r, modelNameCol).getValue()).trim();
               isMatch = rowModelName === String(data.model_name).trim();
             }
@@ -96,9 +166,10 @@ function doPost(e) {
     // 📌 Создание новой заявки на Листе 1
     var sheet = ss.getSheetByName("Заявки") || ss.getSheets()[0];
 
-    var headerRowIndex = findHeaderRow(sheet);
+    var headerRowIndex = ensureInterviewScheduleColumn(sheet);
     var lastCol = Math.max(sheet.getLastColumn(), 12);
     var headers = sheet.getRange(headerRowIndex, 1, 1, lastCol).getValues()[0];
+    var acceptanceColumn = findPartnerAcceptanceColumn(headers);
 
     var newRow = new Array(headers.length).fill("");
     var modelName = (data.model_name && String(data.model_name).trim().length > 0) ? String(data.model_name).trim() : extractModelName(data.form);
@@ -107,12 +178,14 @@ function doPost(e) {
     var modelCode = data.model_code ? String(data.model_code).trim() : "";
 
     // 🪄 Авто-создание персонального отчётника модели
-    var createdReportUrl = createReportSheetForModel(modelName, modelTg);
+    var createdReportUrl = createReportSheetForModel(modelName, modelTg, ss);
 
     for (var i = 0; i < headers.length; i++) {
       var h = String(headers[i]).trim().toLowerCase();
 
-      if (h === "фио" || h === "фио модели") {
+      if (isInterviewScheduleHeader(h)) {
+        newRow[i] = formatInterviewSchedule(data);
+      } else if (h === "фио" || h === "фио модели") {
         newRow[i] = modelName;
       } else if (h === "отчетник") {
         newRow[i] = createdReportUrl;
@@ -120,7 +193,7 @@ function doPost(e) {
         newRow[i] = modelTg;
       } else if (h === "телефон" || h === "номер" || h === "телефон модели") {
         newRow[i] = modelPhone;
-      } else if (h === "id" || h === "id заявки") {
+      } else if (h === "id" || h === "id заявки" || h === "№" || h === "№ заявки") {
         newRow[i] = data.model_code || "";
       } else if (h === "id агента" || h === "айди агента" || h === "агент id" || h === "номер агента" || (h.indexOf("агент") !== -1 && h.indexOf("подтвержд") === -1)) {
         newRow[i] = data.agent_id || data.agent_code || "";
@@ -129,6 +202,7 @@ function doPost(e) {
       }
     }
 
+    if (acceptanceColumn !== -1) newRow[acceptanceColumn - 1] = "Принято";
     sheet.appendRow(newRow);
     var insertedRow = sheet.getLastRow();
 
@@ -141,6 +215,8 @@ function doPost(e) {
       } catch (eFmt) { }
     }
 
+    if (acceptanceColumn !== -1) applyPartnerAcceptanceValidation(sheet, insertedRow, acceptanceColumn, headerRowIndex);
+
     // Если создан отчётник — вставляем в столбец "Отчетник" красивую ссылку-чип =HYPERLINK()
     if (createdReportUrl) {
       for (var k = 0; k < headers.length; k++) {
@@ -152,6 +228,11 @@ function doPost(e) {
         }
       }
       sendReportUrlToBot(data.model_code, modelName, createdReportUrl);
+    }
+
+    if (acceptanceColumn !== -1) {
+      // Изменения из скрипта не вызывают onEdit: синхронизируем статус и кнопки в боте явно.
+      onEditHandler({range: sheet.getRange(insertedRow, acceptanceColumn), value: "Принято", oldValue: ""});
     }
 
     return ContentService.createTextOutput(JSON.stringify({
@@ -181,6 +262,15 @@ function onEditHandler(e) {
 
   var isSheet2 = sheet.getName().toLowerCase().indexOf("запуск") !== -1;
   var isMainSheet = ["заявки", "запуски"].indexOf(sheet.getName().toLowerCase().trim()) !== -1;
+  var acceptanceColumn = isSheet2 ? -1 : findPartnerAcceptanceColumn(headers);
+  var isPartnerAcceptance = editedCol === acceptanceColumn;
+
+  // Дата приходит из записи в боте и не является этапом согласования.
+  if (isInterviewScheduleHeader(editedHeaderName)) {
+    e.range.setValue(e.oldValue !== undefined ? e.oldValue : "");
+    SpreadsheetApp.getActiveSpreadsheet().toast("Дата и время заполняются из бота", "Защита данных", 3);
+    return;
+  }
 
   // Финансовые колонки заполняются только ботом, партнёрам их менять нельзя.
   var isFinancialColumn = editedHeaderName.indexOf("реф") !== -1 ||
@@ -193,7 +283,7 @@ function onEditHandler(e) {
     return;
   }
 
-  var isAllowedEdit = NOTIFY_COLUMNS.some(function (col) {
+  var isAllowedEdit = isPartnerAcceptance || NOTIFY_COLUMNS.some(function (col) {
     return editedHeaderName.indexOf(col) !== -1;
   }) || (isSheet2 && (editedHeaderName.indexOf("фио") !== -1 || editedHeaderName.indexOf("модель") !== -1 || editedHeaderName.indexOf("имя") !== -1));
 
@@ -204,7 +294,7 @@ function onEditHandler(e) {
     return;
   }
 
-  var isWatched = NOTIFY_COLUMNS.some(function (col) {
+  var isWatched = isPartnerAcceptance || NOTIFY_COLUMNS.some(function (col) {
     return editedHeaderName.indexOf(col) !== -1;
   });
 
@@ -245,7 +335,8 @@ function onEditHandler(e) {
   var statusColumns = [];
   for (var statusIndex = 0; statusIndex < headers.length; statusIndex++) {
     var statusHeader = String(headers[statusIndex] || "").trim().toLowerCase();
-    if (statusHeader.indexOf("статус") !== -1 || statusHeader.indexOf("собес") !== -1 ||
+    if (isInterviewScheduleHeader(statusHeader)) continue;
+    if (statusIndex + 1 === acceptanceColumn || statusHeader.indexOf("статус") !== -1 || statusHeader.indexOf("собес") !== -1 ||
       statusHeader.indexOf("принят") !== -1 || statusHeader.indexOf("регистрац") !== -1 ||
       statusHeader.indexOf("подтвержд") !== -1 || statusHeader.indexOf("прод") !== -1 ||
       statusHeader.indexOf("созвон") !== -1 || statusHeader.indexOf("смена") !== -1 ||
@@ -254,7 +345,7 @@ function onEditHandler(e) {
     }
   }
   var editedStatusPosition = statusColumns.indexOf(editedCol);
-  if (editedStatusPosition !== -1 && !isSheet2) {
+  if (editedStatusPosition !== -1 && !isSheet2 && !isPartnerAcceptance) {
     var firstEmptyStatusPosition = statusColumns.length;
     for (var statusPosition = 0; statusPosition < statusColumns.length; statusPosition++) {
       if (!String(sheet.getRange(row, statusColumns[statusPosition]).getValue()).trim()) {
@@ -332,7 +423,7 @@ function onEditHandler(e) {
       }
 
       // Создаём отчётник модели для Листа 2
-      var reportUrl = createReportSheetForModel(modelName, modelTg);
+      var reportUrl = createReportSheetForModel(modelName, modelTg, ss);
 
       var newTargetRow = new Array(targetHeaders.length).fill("");
       for (var t = 0; t < targetHeaders.length; t++) {
@@ -411,10 +502,49 @@ function testDrivePermission() {
   Logger.log("Доступ к шаблону успешно разрешён: " + file.getName());
 }
 
+function copyMainSpreadsheetPermissions(mainSs, reportSs) {
+  if (!mainSs || !reportSs) return;
+
+  var mainFile, reportFile;
+  try {
+    mainFile = DriveApp.getFileById(mainSs.getId());
+    reportFile = DriveApp.getFileById(reportSs.getId());
+  } catch (eFiles) {
+    Logger.log("Предупреждение доступа к файлам при копировании прав отчётника: " + eFiles.toString());
+    return;
+  }
+
+  try {
+    reportFile.setSharing(mainFile.getSharingAccess(), mainFile.getSharingPermission());
+  } catch (eSharing) {
+    Logger.log("Предупреждение копирования общего доступа отчётника: " + eSharing.toString());
+  }
+
+  try {
+    var editors = mainFile.getEditors();
+    for (var i = 0; i < editors.length; i++) {
+      var editorEmail = editors[i].getEmail();
+      if (editorEmail) reportFile.addEditor(editorEmail);
+    }
+  } catch (eEditors) {
+    Logger.log("Предупреждение копирования редакторов отчётника: " + eEditors.toString());
+  }
+
+  try {
+    var viewers = mainFile.getViewers();
+    for (var j = 0; j < viewers.length; j++) {
+      var viewerEmail = viewers[j].getEmail();
+      if (viewerEmail) reportFile.addViewer(viewerEmail);
+    }
+  } catch (eViewers) {
+    Logger.log("Предупреждение копирования просмотрщиков отчётника: " + eViewers.toString());
+  }
+}
+
 /**
  * 🪄 Функция авто-создания отчётника модели через SpreadsheetApp + выдача прав сервисному аккаунту
  */
-function createReportSheetForModel(modelName, modelTg) {
+function createReportSheetForModel(modelName, modelTg, mainSs) {
   if (!TEMPLATE_SHEET_ID || TEMPLATE_SHEET_ID.trim().length < 10) {
     lastCreateError = "TEMPLATE_SHEET_ID пуст или слишком короткий";
     return "";
@@ -423,6 +553,9 @@ function createReportSheetForModel(modelName, modelTg) {
     var templateSs = SpreadsheetApp.openById(TEMPLATE_SHEET_ID);
     var newSs = templateSs.copy("Отчётник — " + modelName);
     var newUrl = newSs.getUrl();
+
+    // Отчётник должен быть доступен тем же партнёрам, что и основная таблица.
+    copyMainSpreadsheetPermissions(mainSs || SpreadsheetApp.getActiveSpreadsheet(), newSs);
 
     // 🔑 Автоматически добавляем сервисный аккаунт бота в редакторы таблицы
     if (SERVICE_ACCOUNT_EMAIL && SERVICE_ACCOUNT_EMAIL.trim().length > 5) {

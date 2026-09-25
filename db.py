@@ -1,3 +1,5 @@
+import html
+import math
 import aiosqlite
 import random
 import re
@@ -346,9 +348,19 @@ async def init_db():
             user_email TEXT DEFAULT '',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS balance_adjustments (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tg_id INTEGER NOT NULL,
+            amount REAL NOT NULL,
+            reason TEXT DEFAULT '',
+            admin_tg_id INTEGER NOT NULL,
+            request_id TEXT UNIQUE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
         """)
         # миграция для баз, созданных старой версией
         for table, column, ddl in (
+            ("balance_adjustments", "request_id", "ALTER TABLE balance_adjustments ADD COLUMN request_id TEXT"),
             ("models", "model_code", "ALTER TABLE models ADD COLUMN model_code TEXT"),
             ("models", "phone", "ALTER TABLE models ADD COLUMN phone TEXT DEFAULT ''"),
             ("models", "username", "ALTER TABLE models ADD COLUMN username TEXT DEFAULT ''"),
@@ -505,6 +517,43 @@ async def mark_all_balances_paid() -> float:
         await db.execute("UPDATE users SET balance = 0 WHERE role != 'banned'")
         await db.commit()
         return float(total or 0)
+
+
+async def earned_last_days(tg_id: int, days: int = 14) -> float:
+    """Начисления за смены за последние N дней, независимо от выплат баланса."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT COALESCE(SUM(ps.amount), 0) FROM processed_shifts ps "
+            "JOIN models m ON m.id = ps.model_id "
+            "WHERE m.owner_tg_id = ? AND ps.created_at >= datetime('now', ?)",
+            (tg_id, f"-{days} days"),
+        )
+        return float((await cur.fetchone())[0] or 0)
+
+
+async def adjust_balance(tg_id: int, amount: float, reason: str, admin_tg_id: int,
+                         request_id: str) -> bool:
+    """Корректировка с аудитом; повторное подтверждение не меняет баланс дважды."""
+    if not math.isfinite(amount) or amount == 0 or not request_id:
+        raise ValueError("Некорректная сумма или идентификатор корректировки")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute("SELECT role FROM users WHERE tg_id = ?", (admin_tg_id,))
+        actor = await cur.fetchone()
+        if not actor or actor[0] != "admin":
+            raise PermissionError("Корректировать баланс может только администратор")
+        cur = await db.execute("SELECT 1 FROM balance_adjustments WHERE request_id = ?", (request_id,))
+        if await cur.fetchone():
+            return False
+        cur = await db.execute("UPDATE users SET balance = balance + ? WHERE tg_id = ?", (amount, tg_id))
+        if cur.rowcount != 1:
+            raise ValueError("Агент не найден")
+        await db.execute(
+            "INSERT INTO balance_adjustments (tg_id, amount, reason, admin_tg_id, request_id) "
+            "VALUES (?,?,?,?,?)", (tg_id, amount, reason, admin_tg_id, request_id),
+        )
+        await db.commit()
+        return True
 
 
 async def get_users_by_role(role: str):
@@ -733,6 +782,29 @@ async def update_model_app_status(model_code: str, app_status: str):
         return await cur.fetchone()
 
 
+async def respond_to_model_application(model_code: str, owner_tg_id: int, *, confirm: bool):
+    """Только владелец с доступом отвечает на принятую заявку, один раз."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        cur = await db.execute(
+            "SELECT m.* FROM models m JOIN users u ON u.tg_id = m.owner_tg_id "
+            "WHERE m.model_code = ? AND m.owner_tg_id = ? "
+            "AND u.role IN ('agent', 'leader', 'mentor', 'admin')",
+            (str(model_code), owner_tg_id),
+        )
+        model = await cur.fetchone()
+        if not model:
+            return None, False
+        if not is_accepted_app_status(model["app_status"]):
+            return model, False
+        status = "Подтверждена агентом" if confirm else "Отклонена агентом"
+        await db.execute("UPDATE models SET app_status = ? WHERE id = ?", (status, model["id"]))
+        await db.commit()
+        cur = await db.execute("SELECT * FROM models WHERE id = ?", (model["id"],))
+        return await cur.fetchone(), True
+
+
 async def update_model_report_sheet(model_code: int | str, report_url: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
@@ -873,8 +945,8 @@ async def toggle_agent_partner(agent_tg_id: int, partner_id: int):
         await db.commit()
 
 
-async def reserve_next_agent_partner(agent_tg_id: int):
-    """Выбирает партнёра агента по кругу и сразу сдвигает указатель."""
+async def reserve_next_agent_partner(agent_tg_id: int, *, advance: bool = True):
+    """Выбирает партнёра по кругу; просмотр формы не сдвигает очередь."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         await db.execute("BEGIN IMMEDIATE")
@@ -894,11 +966,12 @@ async def reserve_next_agent_partner(agent_tg_id: int):
         row = await cur.fetchone()
         index = (row[0] if row else 0) % len(partners)
         partner = partners[index]
-        await db.execute(
-            "INSERT INTO agent_partner_rotation (agent_tg_id, next_index) VALUES (?, ?) "
-            "ON CONFLICT(agent_tg_id) DO UPDATE SET next_index = excluded.next_index",
-            (agent_tg_id, (index + 1) % len(partners)),
-        )
+        if advance:
+            await db.execute(
+                "INSERT INTO agent_partner_rotation (agent_tg_id, next_index) VALUES (?, ?) "
+                "ON CONFLICT(agent_tg_id) DO UPDATE SET next_index = excluded.next_index",
+                (agent_tg_id, (index + 1) % len(partners)),
+            )
         await db.commit()
         return partner
 
@@ -1181,7 +1254,60 @@ APP_STATUSES = [
     "Назначено",
     "Слив",
     "Активна",
+    # Дополняем список, сохраняя индексы уже отправленных кнопок статусов.
+    "Принято",
+    "Не принято",
+    "Подтверждена агентом",
+    "Отклонена агентом",
+    "Пришла на собеседование",
+    "Не пришла",
 ]
+
+
+def normalize_status(raw: str | None) -> str:
+    """Объединяет статусы таблиц и бота, сохраняя старые и неизвестные статусы."""
+    value = str(raw or "").rsplit(":", 1)[-1].strip()
+    status = value.casefold()
+    if not status:
+        return "Не подтверждена"
+    for title in APP_STATUSES:
+        if status == title.casefold():
+            return title
+    if any(word in status for word in ("не приш", "не явил", "не прош")):
+        return "Не пришла"
+    if "не подтвержд" in status:
+        return "Не подтверждена"
+    if "отклон" in status and "агент" in status:
+        return "Отклонена агентом"
+    if "не принят" in status or "непринят" in status:
+        return "Не принято"
+    if any(word in status for word in ("слив", "отмен", "отказ", "отклон")):
+        return "Слив"
+    if any(word in status for word in ("перенос", "перенес", "перенёс")):
+        return "Перенос"
+    if "не актив" in status or "неактив" in status or "не зарегистр" in status:
+        return value
+    if "регистрац" in status or "зарегистр" in status:
+        return "Регистрация"
+    if "актив" in status:
+        return "Активна"
+    if any(word in status for word in ("пришла", "пришел", "пришёл", "явил")) or (
+        "прош" in status and "собес" in status
+    ):
+        return "Пришла на собеседование"
+    if "подтвержд" in status:
+        return "Подтверждена агентом"
+    if is_accepted_app_status(status):
+        return "Принято"
+    return value
+
+
+def fold_breakdown(raw_breakdown: dict) -> dict:
+    result = {}
+    for raw, count in raw_breakdown.items():
+        status = normalize_status(raw)
+        result[status] = result.get(status, 0) + count
+    return result
 
 
 async def set_app_status(model_code: int | str, status: str):
@@ -1226,7 +1352,7 @@ async def analytics_interviews(dfrom: str, dto: str,
             f"GROUP BY COALESCE(m.app_status, 'Не подтверждена')",
             params,
         )
-        return {row[0]: row[1] for row in await cur.fetchall()}
+        return fold_breakdown({row[0]: row[1] for row in await cur.fetchall()})
 
 
 async def new_agents_count(team_id: int, dfrom: str, dto: str) -> int:
@@ -1262,10 +1388,11 @@ async def top_agents(dfrom: str, dto: str, limit: int = 10, solo_only: bool = Fa
     solo_cond = "AND u.team_id IS NULL AND u.role = 'agent' " if solo_only else ""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await db.create_function("normalize_status", 1, normalize_status)
         cur = await db.execute(
             "SELECT u.id AS agent_no, u.tg_id, u.full_name, u.username, "
             " COUNT(m.id) AS records, "
-            " SUM(CASE WHEN m.app_status IN (?, ?) THEN 1 ELSE 0 END) AS regs "
+            " SUM(CASE WHEN normalize_status(m.app_status) IN (?, ?) THEN 1 ELSE 0 END) AS regs "
             "FROM models m JOIN users u ON u.tg_id = m.owner_tg_id "
             "WHERE m.created_at >= ? AND m.created_at < ? "
             + solo_cond +
@@ -1279,10 +1406,11 @@ async def top_teams(dfrom: str, dto: str, limit: int = 10):
     """Топ команд (соло-агенты объединяются в строку «Соло»)"""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        await db.create_function("normalize_status", 1, normalize_status)
         cur = await db.execute(
             "SELECT COALESCE(t.name, 'Соло') AS team_name, u.team_id, "
             " COUNT(m.id) AS records, "
-            " SUM(CASE WHEN m.app_status IN (?, ?) THEN 1 ELSE 0 END) AS regs "
+            " SUM(CASE WHEN normalize_status(m.app_status) IN (?, ?) THEN 1 ELSE 0 END) AS regs "
             "FROM models m JOIN users u ON u.tg_id = m.owner_tg_id "
             "LEFT JOIN teams t ON t.id = u.team_id "
             "WHERE m.created_at >= ? AND m.created_at < ? "
@@ -1381,7 +1509,7 @@ async def format_anketa_topic_message(model: dict, header_title: str) -> str:
         f"━━━━━━━━━━━━━━━\n"
         f"🟢 Агент ID: <code>{agent_code}</code>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"{raw_text}"
+        f"{html.escape(raw_text)}"
     )
     return msg
 

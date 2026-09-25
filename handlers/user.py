@@ -1,5 +1,7 @@
 import asyncio
 import calendar as _calendar
+import logging
+from html import escape
 import re
 from datetime import date
 
@@ -17,6 +19,9 @@ from services.banners import reply_banner
 from services.posts import send_post, parse_post, is_empty
 from config import ADMIN_ID
 from services.google_sheets import send_interview_to_sheet
+from handlers.common import menu_for
+
+logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -39,14 +44,12 @@ class Forms(StatesGroup):
     model_username = State()
 
 
-def menu_for(role: str):
-    if role == "admin":
-        return kb.admin_menu
-    if role == "mentor":
-        return kb.mentor_menu
-    if role == "leader":
-        return kb.leader_menu
-    return kb.main_menu
+async def require_callback_access(call: CallbackQuery) -> bool:
+    user = await db.get_user(call.from_user.id)
+    if not user or user["role"] not in ("agent", "leader", "mentor", "admin"):
+        await call.answer("Нет доступа", show_alert=True)
+        return False
+    return True
 
 
 async def require_access(message: Message) -> object | None:
@@ -90,7 +93,7 @@ async def cmd_start(message: Message, bot: Bot):
         agent_code = u_dict_obj.get("agent_code") if u_dict_obj.get("agent_code") else (1000 + u_dict_obj.get("id", tg_id))
         text = (f"🟢 <b>НОВАЯ ЗАЯВКА НА ВСТУПЛЕНИЕ</b>\n"
                 f"━━━━━━━━━━━━━━━\n"
-                f"👤 Имя: <b>{message.from_user.full_name}</b>\n"
+                f"👤 Имя: <b>{escape(message.from_user.full_name)}</b>\n"
                 f"✅ Агент ID: <code>{agent_code}</code>\n"
                 f"🟢 Юзернейм: @{message.from_user.username or '-'}\n"
                 f"🟩 Telegram ID: <code>{tg_id}</code>")
@@ -98,7 +101,7 @@ async def cmd_start(message: Message, bot: Bot):
             try:
                 await bot.send_message(sid, text, parse_mode="HTML", reply_markup=kb.approve_kb(tg_id))
             except Exception:
-                pass
+                logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
         await message.answer(
             "🔒 Это закрытый бот. Заявка отправлена наставнику - "
             "как только её одобрят, вам откроется доступ"
@@ -128,15 +131,15 @@ async def profile(message: Message):
     team = await db.get_team(u_dict["team_id"]) if u_dict.get("team_id") else None
     agent_name = f"Команда {team['name']}" if team else (u_dict.get("full_name") or "")
     wallet = u_dict.get("wallet") or "не указаны - кнопка «💳 Кошелек»"
-    pending = u_dict.get("pending", 0.0)
+    pending = await db.earned_last_days(message.from_user.id, 14)
     total_earned = u_dict.get("total_earned", 0.0)
     agent_code = u_dict.get("agent_code") if u_dict.get("agent_code") else (1000 + u_dict["id"])
     await reply_banner(
         message, "profile",
-        f"👤 <b>Агент:</b> {agent_name}\n\n"
+        f"👤 <b>Агент:</b> {escape(agent_name)}\n\n"
         f"✅ <b>Агентский айди:</b> <code>{agent_code}</code>\n\n"
-        f"💳 <b>Кошелек:</b> <code>{wallet}</code>\n\n"
-        f"💵 <b>Текущий баланс:</b> ${u_dict.get('balance', 0):.2f} ({pending} за 2 недели)\n"
+        f"💳 <b>Кошелек:</b> <code>{escape(wallet)}</code>\n\n"
+        f"💵 <b>Текущий баланс:</b> ${u_dict.get('balance', 0):.2f} (${pending:.2f} за 2 недели)\n"
         f"🏆 <b>Заработано за всё время:</b> ${total_earned:.2f}\n\n"
         f"📗 Выплаты средств теперь доступны от суммы 50$, "
         f"всё, что меньше, остаётся в накоплениях\n\n"
@@ -366,7 +369,7 @@ async def interview_position(message: Message, state: FSMContext):
     position = "Модель" if "Модель" in message.text else "Оператор"
     await state.update_data(position=position)
     if position == "Модель":
-        partner = await db.reserve_next_agent_partner(message.from_user.id)
+        partner = await db.reserve_next_agent_partner(message.from_user.id, advance=False)
         if not partner:
             await state.clear()
             user = await db.get_user(message.from_user.id)
@@ -669,9 +672,9 @@ async def show_preview(message: Message, state: FSMContext):
     
     comment_parts = []
     if data.get("model_comment"):
-        comment_parts.append(f"💬 <b>Комментарий по модели:</b>\n{data['model_comment']}")
+        comment_parts.append(f"💬 <b>Комментарий по модели:</b>\n{escape(data['model_comment'])}")
     if data.get("comment"):
-        comment_parts.append(f"✍️ <b>От агента:</b>\n{data['comment']}")
+        comment_parts.append(f"✍️ <b>От агента:</b>\n{escape(data['comment'])}")
         
     comment_block = ("\n\n" + "\n\n".join(comment_parts)) if comment_parts else ""
     photos_line = f"\n📸 Фото: {len(data['photos'])} шт" if data.get("photos") else ""
@@ -680,7 +683,7 @@ async def show_preview(message: Message, state: FSMContext):
         f"Позиция: <b>{data.get('position', '-')}</b>\n"
         f"📅 Собес: <b>{data.get('date', '-')} в {data.get('time', '-')} МСК</b>"
         f"{photos_line}\n\n"
-        f"{data['form']}"
+        f"{escape(data['form'])}"
         f"{comment_block}",
         parse_mode="HTML",
         reply_markup=confirm_menu,
@@ -689,11 +692,25 @@ async def show_preview(message: Message, state: FSMContext):
 
 @router.message(Forms.interview_confirm, F.text == "📤 Отправить")
 async def interview_send(message: Message, state: FSMContext, bot: Bot):
+    user = await require_access(message)
+    if not user:
+        await state.clear()
+        return
     data = await state.get_data()
     if not data.get("form"):
         await state.clear()
         return await message.answer("Заявка устарела, начните заново")
     await state.clear()
+
+    # Очередь меняется только при отправке, отменённые анкеты её не сдвигают.
+    if data.get("position") == "Модель":
+        partner = await db.reserve_next_agent_partner(message.from_user.id)
+        if not partner:
+            return await message.answer(
+                "🔒 Доступ к записи ещё не открыт. Запросите доступ у наставника",
+                reply_markup=menu_for(user["role"]),
+            )
+        data["partner"] = partner["name"]
     
     comment_parts = []
     if data.get("model_comment"):
@@ -739,7 +756,7 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
             else:
                 await bot.send_message(sid, staff_msg)
         except Exception:
-            pass
+            logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
 
     # Интеграция с чатами и Google Таблицей (ТОЛЬКО для позиций "Модель")
     if data.get("position") == "Модель" and data.get("partner"):
@@ -754,8 +771,8 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
                     f"📋 <b>Новая заявка на собеседование · ID модели {model_code}</b>\n"
                     f"👤 <b>Агент ID:</b> <code>{agent_code}</code>\n"
                     f"📅 <b>Дата и время:</b> {data.get('date', '-')} в {data.get('time', '-')} МСК\n\n"
-                    f"<b>Анкета:</b>\n{data['form']}"
-                    f"{comment_block}"
+                    f"<b>Анкета:</b>\n{escape(data['form'])}"
+                    f"{escape(comment_block)}"
                 )
                 try:
                     kwargs = {}
@@ -791,7 +808,7 @@ async def interview_send(message: Message, state: FSMContext, bot: Bot):
                     "time": data.get("time", ""),
                     "form": data.get("form", ""),
                     "comment": data.get("comment", ""),
-                    "status": "Не подтверждена",
+                    "status": "Принято",
                 }
                 asyncio.create_task(send_interview_to_sheet(partner_obj["sheet_url"], sheet_payload))
 
@@ -811,7 +828,7 @@ async def interview_cancel(call: CallbackQuery, state: FSMContext):
     try:
         await call.message.edit_reply_markup(reply_markup=None)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     user = await db.get_user(call.from_user.id)
     role = user["role"] if user else "agent"
     await call.message.answer("🔴 Действие отменено", reply_markup=menu_for(role))
@@ -834,7 +851,7 @@ async def training(message: Message):
 async def show_material(call: CallbackQuery):
     material = await db.get_material(int(call.data.split(":")[1]))
     if material:
-        await call.message.answer(f"📗 <b>{material['title']}</b>\n\n{material['content']}", parse_mode="HTML")
+        await call.message.answer(f"📗 <b>{escape(material['title'])}</b>\n\n{material['content']}", parse_mode="HTML")
     await call.answer()
 
 
@@ -915,9 +932,9 @@ def render_models_page(models, status: str, page: int) -> str:
         phone = m["phone"] or "-"
         username = f"@{m['username'].lstrip('@')}" if m["username"] else "-"
         lines.append(
-            f"<b>{i}. {m['name']}</b>\n"
+            f"<b>{i}. {escape(m['name'])}</b>\n"
             f"🆔 ID модели: <code>{m['model_code']}</code>\n"
-            f"📞 {phone}   🟢 {username}\n"
+            f"📞 {escape(phone)}   🟢 {escape(username)}\n"
             f"⏱ Смен: <b>{m['shifts']}</b>"
         )
     total_pages = (len(models) - 1) // PAGE_SIZE + 1
@@ -956,6 +973,8 @@ async def my_models(message: Message):
 
 @router.callback_query(F.data.startswith("models:"))
 async def models_by_status(call: CallbackQuery, state: FSMContext):
+    if not await require_callback_access(call):
+        return
     action = call.data.split(":")[1]
     if action == "add":
         await state.set_state(Forms.model_name)
@@ -969,6 +988,8 @@ async def models_by_status(call: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("mpage:"))
 async def models_page(call: CallbackQuery):
+    if not await require_callback_access(call):
+        return
     _, status, page = call.data.split(":")
     await send_models_list(call.message, call.from_user.id, status, int(page), edit=True)
     await call.answer()
@@ -1022,9 +1043,9 @@ def render_model_card(m) -> str:
     phone = m["phone"] or "-"
     uname = f"@{m['username']}" if m["username"] else "-"
     return (f"{STATUS_TITLES[m['status']]}\n\n"
-            f"💵 <b>{m['name']}</b>\n"
-            f"📞 Телефон: {phone}\n"
-            f"🟢 Telegram: {uname}\n"
+            f"💵 <b>{escape(m['name'])}</b>\n"
+            f"📞 Телефон: {escape(phone)}\n"
+            f"🟢 Telegram: {escape(uname)}\n"
             f"🟩 Смен: {m['shifts']}")
 
 
@@ -1045,20 +1066,17 @@ async def model_shift(call: CallbackQuery):
 
 @router.callback_query(F.data.startswith("mstat:"))
 async def model_status(call: CallbackQuery):
-    _, model_id, status = call.data.split(":")
-    await db.set_model_status(int(model_id), call.from_user.id, status)
-    m = await db.get_model_by_id(int(model_id), call.from_user.id)
-    if m:
-        await call.message.edit_text(render_model_card(m), parse_mode="HTML",
-                                     reply_markup=kb.model_card_kb(m["model_code"], m["status"]))
+    await call.answer("Статус модели ставит партнёр", show_alert=True)
+
+
 @router.callback_query(F.data.startswith("agent_confirm:"))
 async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
     model_code = call.data.split(":")[1]
-    model = await db.get_model_by_code(model_code)
+    model, changed = await db.respond_to_model_application(model_code, call.from_user.id, confirm=True)
     if not model:
-        return await call.answer("Модель не найдена", show_alert=True)
-    
-    model = await db.update_model_app_status(model_code, "Подтверждена агентом")
+        return await call.answer("Модель не найдена среди ваших или доступ закрыт", show_alert=True)
+    if not changed:
+        return await call.answer("Ответ уже получен или статус заявки изменился", show_alert=True)
     
     name = model["name"] or "Модель"
     
@@ -1090,7 +1108,7 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
     await call.message.edit_text(
         f"✅ <b>МОДЕЛЬ {model_code} ПОДТВЕРЖДЕНА</b>\n"
         f"━━━━━━━━━━━━━━━\n"
-        f"💚 <b>{name}</b> отмечена как подтверждённая агентом",
+        f"💚 <b>{escape(name)}</b> отмечена как подтверждённая агентом",
         parse_mode="HTML"
     )
     await call.answer("✅ Подтверждено!")
@@ -1099,11 +1117,11 @@ async def agent_confirm_interview(call: CallbackQuery, bot: Bot):
 @router.callback_query(F.data.startswith("agent_reject:"))
 async def agent_reject_interview(call: CallbackQuery, bot: Bot):
     model_code = call.data.split(":")[1]
-    model = await db.get_model_by_code(model_code)
+    model, changed = await db.respond_to_model_application(model_code, call.from_user.id, confirm=False)
     if not model:
-        return await call.answer("Модель не найдена", show_alert=True)
-        
-    model = await db.update_model_app_status(model_code, "Отклонена агентом")
+        return await call.answer("Модель не найдена среди ваших или доступ закрыт", show_alert=True)
+    if not changed:
+        return await call.answer("Ответ уже получен или статус заявки изменился", show_alert=True)
     
     partner_name = model["partner"]
     if partner_name and partner_name != "-":
@@ -1212,7 +1230,7 @@ async def onb_next(call: CallbackQuery, state: FSMContext, bot: Bot):
     try:
         await call.message.edit_reply_markup(reply_markup=None)
     except Exception:
-        pass
+        logger.warning("Не удалось отправить/обработать уведомление", exc_info=True)
     if step == "done":
         await state.clear()
         await db.set_onboarded(call.from_user.id, 1)

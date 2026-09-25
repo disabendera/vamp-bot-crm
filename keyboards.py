@@ -62,6 +62,7 @@ admin_panel_kb = InlineKeyboardMarkup(inline_keyboard=[
     [InlineKeyboardButton(text="🧭 Путь агента (соло/команда)", callback_data="adm:agent_path")],
     [InlineKeyboardButton(text="👥 Команды", callback_data="adm:teams")],
     [InlineKeyboardButton(text="🏆 Топы (воронка)", callback_data="adm:tops")],
+    [InlineKeyboardButton(text="💵 Корректировка баланса", callback_data="adm:adjust")],
     [InlineKeyboardButton(text="🛒 Магазин (пост)", callback_data="adm:shop_view")],
     [InlineKeyboardButton(text="📣 Рассылка всем", callback_data="adm:broadcast")],
     [InlineKeyboardButton(text="➕ Добавить партнёра", callback_data="adm:add_partner")],
@@ -100,14 +101,9 @@ def models_page_kb(status: str, page: int, has_prev: bool, has_next: bool) -> In
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def model_card_kb(model_id: int, status: str) -> InlineKeyboardMarkup:
-    toggle = (
-        InlineKeyboardButton(text="Слив 🚫", callback_data=f"mstat:{model_id}:dropped")
-        if status == "active"
-        else InlineKeyboardButton(text="Активна ✅", callback_data=f"mstat:{model_id}:active")
-    )
-    # смены считаются автоматически из отчётника модели - кнопок ручной правки нет
-    return InlineKeyboardMarkup(inline_keyboard=[[toggle]])
+def model_card_kb(model_id: int | str, status: str):
+    # Статус ведёт партнёр в таблице, смены считаются из отчётника.
+    return None
 
 
 def materials_kb(materials) -> InlineKeyboardMarkup:
